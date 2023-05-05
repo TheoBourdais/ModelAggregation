@@ -2,6 +2,7 @@ import numpy as np
 from sklearn.metrics import pairwise_distances
 from functools import partial
 from tqdm import tqdm
+import cvxpy as cp
 
 
 
@@ -11,7 +12,7 @@ class PDESolverLaplace():
         self.X_int=X_int
         self.X_boundary=X_boundary
         self.X_shared=X_shared
-        self.X_all=np.concatenate([X_int,X_boundary,X_shared])
+        self.X_all=np.concatenate([X_int,X_shared,X_boundary])
         self.Nd=X_int.shape[0]
         self.sigma=sigma
         self.memory={}
@@ -22,7 +23,7 @@ class PDESolverLaplace():
         self.nugget=nugget
         self.K_mat = PDESolverLaplace.get_kernel_matrix(self.X_all,self.Nd,self.sigma,nugget)
         self.L=np.linalg.inv(np.linalg.cholesky(self.K_mat))
-        self.a=PDESolverLaplace.get_target_values(self.X_int,self.X_boundary,f,g)
+        self.target_values=PDESolverLaplace.get_target_values(self.X_int,self.X_boundary,f,g)
 
     def covariate_with_other(self,other_GP,x):
         M=self.find_covariance_matrix(other_GP)
@@ -64,6 +65,20 @@ class PDESolverLaplace():
         g_vec=np.array([g(x) for x in x_ext])
         f_vec=np.array([f(x) for x in x_int])
         return np.concatenate([g_vec,f_vec])
+    
+    def joint_fit(models,f,g,nugget=1e-5):
+        for model in models:
+            model.setup_fit(f,g,nugget)
+        x = cp.Variable(models[0].X_shared.shape[0])
+        indiv_objectives=[cp.quad_form(cp.vstack(x,model.target_values),model.L.T@model.L) for model in models]
+        objective = cp.Minimize(sum(indiv_objectives))
+        prob=cp.Problem(objective)
+        result=prob.solve()
+        shared_value= x.value()
+        for model in models:
+            model.a=np.concatenate([shared_value,model.target_values])
+        
+
     
 
 
