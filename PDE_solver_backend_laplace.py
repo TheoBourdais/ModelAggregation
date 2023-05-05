@@ -18,7 +18,7 @@ class PDESolverLaplace():
         if name is not None:
             self.name=name
 
-    def fit(self,f,g,nugget=1e-5):
+    def setup_fit(self,f,g,nugget=1e-5):
         self.nugget=nugget
         self.K_mat = PDESolverLaplace.get_kernel_matrix(self.X_all,self.Nd,self.sigma,nugget)
         self.L=np.linalg.inv(np.linalg.cholesky(self.K_mat))
