@@ -69,12 +69,12 @@ class PDESolverLaplace():
     def joint_fit(models,f,g,nugget=1e-5):
         for model in models:
             model.setup_fit(f,g,nugget)
-        x = cp.Variable(models[0].X_shared.shape[0])
-        indiv_objectives=[cp.quad_form(cp.vstack(x,model.target_values),model.L.T@model.L) for model in models]
-        objective = cp.Minimize(sum(indiv_objectives))
-        prob=cp.Problem(objective)
-        result=prob.solve()
-        shared_value= x.value()
+        N_shared=models[0].X_shared.shape[0]
+        
+        mat_left=np.sum([model.L[:,:N_shared].T@model.L[:,:N_shared] for model in models],axis=0)
+        target=np.sum([model.L[:,:N_shared].T@model.L[:,N_shared:]@model.target_values for model in models],axis=0)
+        shared_value=-np.linalg.solve(mat_left,target)
+
         for model in models:
             model.a=np.concatenate([shared_value,model.target_values])
         
