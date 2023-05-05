@@ -7,10 +7,11 @@ from tqdm import tqdm
 
 
 class PDESolverLaplace():
-    def __init__(self,X_int,X_boundary,sigma,name=None) -> None:
+    def __init__(self,X_int,X_boundary,X_shared,sigma,name=None) -> None:
         self.X_int=X_int
         self.X_boundary=X_boundary
-        self.X_all=np.concatenate([X_int,X_boundary])
+        self.X_shared=X_shared
+        self.X_all=np.concatenate([X_int,X_boundary,X_shared])
         self.Nd=X_int.shape[0]
         self.sigma=sigma
         self.memory={}
