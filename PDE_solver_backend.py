@@ -20,34 +20,37 @@ class PDESolver:
         self.neighbors = []
         self.solved_shared = {}
 
+    def setup_fit(self, f, g, nugget):
+        self.nugget = nugget
+        self.K_mat = PDESolver.get_kernel_matrix(
+            self.X_all, self.Nd, self.sigma, nugget
+        )
+        self.L = np.linalg.inv(np.linalg.cholesky(self.K_mat))
+        self.K_inv = self.L.T @ self.L
+
+        self.K_mat_laplace = PDESolver.get_kernel_matrix_laplace(
+            self.X_all, self.Nd, self.sigma, nugget
+        )
+        self.K_inv_laplace = np.linalg.inv(self.K_mat_laplace)
+
+        self.g_vec = np.array([g(x) for x in self.X_boundary])
+        self.f_vec = np.array([f(x) for x in self.X_int])
+
     def fit_interior(self, f, g, tau, dtau, use_shared, nugget=1e-5):
         if not hasattr(self, "g_vec"):
-            self.nugget = nugget
-            self.K_mat = PDESolver.get_kernel_matrix(
-                self.X_all, self.Nd, self.sigma, nugget
-            )
-            self.L = np.linalg.inv(np.linalg.cholesky(self.K_mat))
-            self.K_inv = self.L.T @ self.L
-
-            self.K_mat_laplace = PDESolver.get_kernel_matrix_laplace(
-                self.X_all, self.Nd, self.sigma, nugget
-            )
-            self.K_inv_laplace = np.linalg.inv(self.K_mat_laplace)
-
-            self.g_vec = np.array([g(x) for x in self.X_boundary])
-            self.f_vec = np.array([f(x) for x in self.X_int])
+            self.setup_fit(f, g, nugget)
         z_shared, L = self.get_shared_values(use_shared)
         self.gauss_newton_solution = PDESolver.gauss_newton(
-            self.X_int,
-            self.X_boundary,
-            z_shared,
-            L,
-            self.f_vec,
-            self.g_vec,
-            tau,
-            dtau,
+            x_int=self.X_int,
+            x_ext=self.X_boundary,
+            z_shared=z_shared,
+            L=L,
+            f_vec=self.f_vec,
+            g_vec=self.g_vec,
+            tau=tau,
+            dtau=dtau,
         )
-        self.a = self.gauss_newton_solution["alpha"]
+        # self.a = self.gauss_newton_solution["alpha"]
 
     def finish_fit(self):
         z_shared = np.concatenate([self.shared_value[n] for n in self.neighbors])
@@ -61,11 +64,11 @@ class PDESolver:
         )
         self.coeff = self.K_inv @ self.a
         # to be deleted
-        size = self.gauss_newton_solution["z"].shape[0]
-        self.coeff[:size] = 0
-        self.coeff[size:] = self.K_inv_laplace @ np.concatenate(
-            [z_shared, self.g_vec, self.gauss_newton_solution["z_lap"]]
-        )
+        # size = self.gauss_newton_solution["z"].shape[0]
+        # self.coeff[:size] = 0
+        # self.coeff[size:] = self.K_inv_laplace @ np.concatenate(
+        #    [z_shared, self.g_vec, self.gauss_newton_solution["z_lap"]]
+        # )
 
     def get_shared_values(self, use_shared):
         if use_shared:
@@ -143,20 +146,23 @@ class PDESolver:
             axis=0,
         )
         for model in models:
-            model.joint_fit = {"pairs": pairs, "mat_left": mat_left}
+            model.joint_fit_utils = {"pairs": pairs, "mat_left": mat_left}
         return pairs, mat_left
 
     def joint_fit_boundaries(models):
         # we might need to remove the point obeservations to really have convergence
-        if not hasattr(models[0], "joint_fit"):
+        if not hasattr(models[0], "joint_fit_utils"):
             pairs, mat_left = PDESolver.setup_joint_fit(models)
         else:
-            pairs = models[0].joint_fit["pairs"]
-            mat_left = models[0].joint_fit["mat_left"]
+            pairs = models[0].joint_fit_utils["pairs"]
+            mat_left = models[0].joint_fit_utils["mat_left"]
 
         targets = []
         for model in models:
             target = np.zeros(mat_left.shape[0])
+            model_target = np.concatenate(
+                [model.g_vec, model.gauss_newton_solution["z_lap"]]
+            )
             for other_model in model.neighbors:
                 begin, end = model.get_shared_indices(other_model)
                 try:
@@ -168,7 +174,7 @@ class PDESolver:
                 target[indices1[0] : indices1[1]] = (
                     # model.K_inv[begin:end, :Nbegin] @ model.a[:Nbegin]+
                     model.K_inv_laplace[begin:end, -Nend:]
-                    @ model.a[-Nend:]
+                    @ model_target
                 )
             targets.append(target)
 
@@ -187,6 +193,47 @@ class PDESolver:
                     indices = pairs[(n, model)]
                 model.shared_value[n] = shared_value[indices[0] : indices[1]]
             model.finish_fit()
+
+    def joint_fit(models, f, g, tau, dtau, nugget=1e-5, tol=1e-6):
+        dz = {}
+        for model in models:
+            if not hasattr(model, "g_vec"):
+                model.setup_fit(f, g, nugget)
+            z_shared, L = model.get_shared_values(False)
+            model.gauss_newton_solution, dz[model] = PDESolver.gauss_newton_step(
+                x_int=model.X_int,
+                x_ext=model.X_boundary,
+                z=np.zeros(model.X_int.shape[0]),
+                z_shared=z_shared,
+                L=L,
+                f_vec=model.f_vec,
+                g_vec=model.g_vec,
+                tau=tau,
+                dtau=dtau,
+            )
+        PDESolver.joint_fit_boundaries(models)
+        progress = tqdm()
+        dz_norm = 10
+        while dz_norm > tol:
+            for model in models:
+                z_shared, L = model.get_shared_values(True)
+                model.gauss_newton_solution, dz[model] = PDESolver.gauss_newton_step(
+                    x_int=model.X_int,
+                    x_ext=model.X_boundary,
+                    z=model.gauss_newton_solution["z"],
+                    z_shared=z_shared,
+                    L=L,
+                    f_vec=model.f_vec,
+                    g_vec=model.g_vec,
+                    tau=tau,
+                    dtau=dtau,
+                )
+
+            dz_norm = np.max([np.linalg.norm(dz[model], np.inf) for m in models])
+            progress.set_description(f"Current residual {dz_norm:.3e}")
+            progress.update()
+            PDESolver.joint_fit_boundaries(models)
+        progress.close()
 
     def covariate_with_other(self, other_GP, x, sigma):
         M = self.find_covariance_matrix(other_GP, sigma)
@@ -243,21 +290,32 @@ class PDESolver:
         z = np.zeros(x_int.shape[0])
         alpha = lambda z: np.concatenate([z, z_shared, g_vec, f_vec - tau(z)])
         dz = 3 * np.ones_like(z)
-        # progress = tqdm()
+        res = {}
+        progress = tqdm()
         while np.linalg.norm(dz, np.inf) > 1e-6:
-            H = PDESolver.differential_matrix(
-                z, x_int.shape[0], x_ext.shape[0] + z_shared.shape[0], dtau
+            res, dz = PDESolver.gauss_newton_step(
+                x_int, x_ext, z, z_shared, L, f_vec, g_vec, tau, dtau
             )
-            target = L @ alpha(z)
-            mat = L @ H
-            dz = np.linalg.lstsq(mat, target, rcond=None)[0]
-            z += dz
-            # progress.set_description(
-            #    f"Current residual {np.linalg.norm(dz,np.inf):.3e}"
-            # )
-            # progress.update()
-        # progress.close()
-        return {"z": z, "z_lap": f_vec - tau(z), "alpha": alpha(z)}
+            progress.set_description(
+                f"Current residual {np.linalg.norm(dz,np.inf):.3e}"
+            )
+            progress.update()
+        progress.close()
+        return res
+
+    def gauss_newton_step(x_int, x_ext, z, z_shared, L, f_vec, g_vec, tau, dtau):
+        H = PDESolver.differential_matrix(
+            z, x_int.shape[0], x_ext.shape[0] + z_shared.shape[0], dtau
+        )
+        target = L @ np.concatenate([z, z_shared, g_vec, f_vec - tau(z)])
+        mat = L @ H
+        dz = np.linalg.lstsq(mat, target, rcond=None)[0]
+        z += dz
+        return {
+            "z": z,
+            "z_lap": f_vec - tau(z),
+            "alpha": np.concatenate([z, z_shared, g_vec, f_vec - tau(z)]),
+        }, dz
 
     def get_kernel_matrix(X, Nd, sigma, nugget):
         return PDESolver.get_covariance_matrix(X, X, Nd, Nd, sigma, nugget)
