@@ -2,6 +2,7 @@ import numpy as np
 from sklearn.metrics import pairwise_distances
 from functools import partial
 from tqdm import tqdm
+from random import shuffle
 
 
 class PDESolver:
@@ -215,7 +216,9 @@ class PDESolver:
         progress = tqdm()
         dz_norm = 10
         while dz_norm > tol:
-            for model in models:
+            indexes = [k for k in range(len(models))]
+            shuffle(indexes)
+            for model in [models[k] for k in indexes]:
                 z_shared, L = model.get_shared_values(True)
                 model.gauss_newton_solution, dz[model] = PDESolver.gauss_newton_step(
                     x_int=model.X_int,
