@@ -117,7 +117,11 @@ class PDESolverLaplace:
         return np.dot(
             self.coeff,
             PDESolverLaplace.get_laplacian_kernel_vector(
-                self.X_all, self.Nd, self.sigma, x
+                self.X_int,
+                self.all_shared,
+                self.X_boundary,
+                self.sigma,
+                x,
             ),
         )
 
@@ -208,78 +212,41 @@ class PDESolverLaplace:
         return mat_left, target, pairs
 
     def get_kernel_matrix(X_int, X_shared, X_ext, sigma, nugget):
-        X_dirac = np.concatenate([X_shared, X_ext])
-        k = gaussianKernel(sigma)
         k2 = FasterGaussianKernel(sigma, X_int, X_shared, X_ext)
-        dirac_mat = k.evaluate(k.gauss, X_dirac, X_dirac)
-        dirac_mat2 = k2.get_dirac()
-        assert np.linalg.norm(dirac_mat - dirac_mat2, np.inf) < 1e-10
-        dx1 = k.evaluate(k.dxgauss, X_shared, X_dirac)
-        dx12 = k2.get_dx()
-        assert np.linalg.norm(dx1 - dx12, np.inf) < 1e-10
-        dy1 = k.evaluate(k.dygauss, X_shared, X_dirac)
-        dy12 = k2.get_dy()
-        assert np.linalg.norm(dy1 - dy12, np.inf) < 1e-10
-        lap1 = k.evaluate(k.lapgauss, X_int, X_dirac)
-        lap12 = k2.get_lap()
-        assert np.linalg.norm(lap1 - lap12, np.inf) < 1e-10
-        ddx1 = k.evaluate(k.ddxgauss, X_shared, X_shared)
-        ddx12 = k2.get_dx1dx2()
-        assert np.linalg.norm(ddx1 - ddx12, np.inf) < 1e-10
-        dydx1 = k.evaluate(k.dxygauss, X_shared, X_shared)
-        dydx12 = k2.get_dy1dx2()
-        assert np.linalg.norm(dydx1 - dydx12, np.inf) < 1e-10
-        dxlap = k.evaluate(k.dxlapgauss, X_int, X_shared)
-        dxlap2 = k2.get_lap1dx2()
-        print(dxlap)
-        print(dxlap2)
-        print(np.linalg.norm(dxlap - dxlap2, np.inf))
-        assert np.linalg.norm(dxlap - dxlap2, np.inf) < 1e-9
-        ddy = k.evaluate(k.ddygauss, X_shared, X_shared)
-        ddy2 = k2.get_dy1dy2()
-        assert np.linalg.norm(ddy2 - ddy, np.inf) < 1e-10
-        dylap = k.evaluate(k.dylapgauss, X_int, X_shared)
-        dylap2 = k2.get_lap1dy2()
-        print(dylap)
-        print(dylap2)
-        print(np.linalg.norm(dylap - dylap2, np.inf))
-        assert np.linalg.norm(dylap - dylap2, np.inf) < 1e-9
-        laplap = k.evaluate(k.laplapgauss, X_int, X_int)
-        laplap2 = k2.get_lap1lap2()
-        print(laplap)
-        print(laplap2)
-        print(np.linalg.norm(laplap - laplap2, np.inf))
-        assert np.linalg.norm(laplap - laplap2, np.inf) < 1e-7
+        dirac_mat = k2.get_dirac()
+        dx1 = k2.get_dx()
+        dy1 = k2.get_dy()
+        lap1 = k2.get_lap()
+        ddx1 = k2.get_dx1dx2()
+        dydx1 = k2.get_dy1dx2()
+        dxlap = k2.get_lap1dx2()
+        ddy = k2.get_dy1dy2()
+        dylap = k2.get_lap1dy2()
+        laplap = k2.get_lap1lap2()
         res = [
             [dirac_mat, dx1.T, dy1.T, lap1.T],
             [dx1, ddx1, dydx1.T, dxlap.T],
             [dy1, dydx1, ddy, dylap.T],
             [lap1, dxlap, dylap, laplap],
         ]
-        # res = [
-        #    [dirac_mat, lap1.T],
-        #    [lap1, laplap],
-        # ]
         res = np.block(res)
         return res + np.eye(res.shape[0]) * nugget
 
     def get_kernel_vector(X_int, X_shared, X_ext, sigma, x):
-        k = gaussianKernel(sigma)
-        X_dirac = np.concatenate([X_shared, X_ext])
-        dirac_mat = k.evaluate(k.gauss, X_dirac, x)
-        dx1 = k.evaluate(k.dxgauss, X_shared, x)
-        dy1 = k.evaluate(k.dygauss, X_shared, x)
-        lap1 = k.evaluate(k.lapgauss, X_int, x)
-        # return np.concatenate([dirac_mat, lap1])
+        k2 = GaussianKernelVectorDirac(sigma, X_int, X_shared, X_ext, x)
+        dirac_mat = k2.get_dirac()
+        dx1 = k2.get_dx()
+        dy1 = k2.get_dy()
+        lap1 = k2.get_lap()
         return np.concatenate([dirac_mat, dx1, dy1, lap1])
 
     def get_laplacian_kernel_vector(X_int, X_shared, X_ext, sigma, x):
-        k = gaussianKernel(sigma)
-        X_dirac = np.concatenate([X_shared, X_ext])
-        lap = k.evaluate(k.lapgauss, X_dirac, x)
-        dxlap = k.evaluate(k.dxlapgauss, X_shared, x)
-        dylap = k.evaluate(k.dylapgauss, X_shared, x)
-        laplap = k.evaluate(k.laplapgauss, X_int, x)
+        k2 = GaussianKernelVectorLap(sigma, X_int, X_shared, X_ext, x)
+        lap = k2.get_lap()
+        dxlap = k2.get_lap1dx2()
+        dylap = k2.get_lap1dy2()
+        laplap = k2.get_lap1lap2()
+
         return np.concatenate([lap, dxlap, dylap, laplap])
 
 
@@ -324,6 +291,82 @@ class gaussianKernel:
             list(map(lambda x2: func(x1[0], x1[1], x2[0], x2[1], self.sigma), X2))
         )
         return np.stack(list(map(row_func, X1)))
+
+
+class GaussianKernelVectorDirac:
+    def __init__(self, s, X_int, X_shared, X_boundary, x):
+        self.sigma = s
+        self.x = x
+        self.X_int = X_int
+        self.X_shared = X_shared
+        self.X_boundary = X_boundary
+        self.X_dirac = np.concatenate([X_shared, X_boundary])
+        self.size_dirac = self.X_dirac.shape[0]
+        self.all = np.concatenate([X_shared, X_boundary, X_int])
+        self.distances = pairwise_distances(self.all, Y=x) ** 2
+        self.exp_d = np.exp(-self.distances / 2 / s**2)
+
+    def get_dirac(self):
+        return self.exp_d[: self.size_dirac, :]
+
+    def get_dx(self):
+        diff_mat = np.expand_dims(self.x[:, 0], 0) - np.expand_dims(
+            self.X_shared[:, 0], 1
+        )
+        return self.exp_d[: self.X_shared.shape[0], :] * diff_mat / self.sigma**2
+
+    def get_dy(self):
+        diff_mat = np.expand_dims(self.x[:, 1], 0) - np.expand_dims(
+            self.X_shared[:, 1], 1
+        )
+        return self.exp_d[: self.X_shared.shape[0], :] * diff_mat / self.sigma**2
+
+    def get_lap(self):
+        to_mult = (
+            self.distances[-self.X_int.shape[0] :, :] - 2 * self.sigma**2
+        ) / self.sigma**4
+        return -self.exp_d[-self.X_int.shape[0] :, :] * to_mult
+
+
+class GaussianKernelVectorLap:
+    def __init__(self, s, X_int, X_shared, X_boundary, x):
+        self.sigma = s
+        self.x = x
+        self.X_int = X_int
+        self.X_shared = X_shared
+        self.X_boundary = X_boundary
+        self.X_dirac = np.concatenate([X_shared, X_boundary])
+        self.size_dirac = self.X_dirac.shape[0]
+        self.all = np.concatenate([X_shared, X_boundary, X_int])
+        self.distances = pairwise_distances(self.all, Y=x) ** 2
+        self.exp_d = np.exp(-self.distances / 2 / s**2)
+
+    def get_lap(self):
+        to_mult = (
+            self.distances[: self.size_dirac, :] - 2 * self.sigma**2
+        ) / self.sigma**4
+        return -self.exp_d[: self.size_dirac, :] * to_mult
+
+    def get_lap1dx2(self):
+        lap_like = (
+            self.distances[: self.X_shared.shape[0], :] - 4 * self.sigma**2
+        ) / self.sigma**6
+        diff = np.expand_dims(self.X_shared[:, 0], 1) - np.expand_dims(self.x[:, 0], 0)
+        return self.exp_d[: self.X_shared.shape[0], :] * lap_like * diff
+
+    def get_lap1dy2(self):
+        lap_like = (
+            self.distances[: self.X_shared.shape[0], :] - 4 * self.sigma**2
+        ) / self.sigma**6
+        diff = np.expand_dims(self.X_shared[:, 1], 1) - np.expand_dims(self.x[:, 1], 0)
+        return self.exp_d[: self.X_shared.shape[0], :] * lap_like * diff
+
+    def get_lap1lap2(self):
+        dist = (
+            (self.distances[-self.X_int.shape[0] :, :] - 4 * self.sigma**2) ** 2
+            - 8 * self.sigma**4
+        ) / self.sigma**8
+        return self.exp_d[-self.X_int.shape[0] :, :] * dist
 
 
 class FasterGaussianKernel:

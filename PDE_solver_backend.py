@@ -23,67 +23,101 @@ class PDESolver:
 
     def setup_fit(self, f, g, nugget):
         self.nugget = nugget
+        try:
+            self.all_shared = np.concatenate(list(self.X_shared.values()))
+        except:
+            self.all_shared = np.empty((0, 2))
         self.K_mat = PDESolver.get_kernel_matrix(
-            self.X_all, self.Nd, self.sigma, nugget
+            self.X_int,
+            self.all_shared,
+            self.X_boundary,
+            self.sigma,
+            nugget,
+            laplaceBool=False,
         )
         self.L = np.linalg.inv(np.linalg.cholesky(self.K_mat))
         self.K_inv = self.L.T @ self.L
 
-        self.K_mat_laplace = PDESolver.get_kernel_matrix_laplace(
-            self.X_all, self.Nd, self.sigma, nugget
+        self.K_mat_laplace = PDESolver.get_kernel_matrix(
+            self.X_int,
+            self.all_shared,
+            self.X_boundary,
+            self.sigma,
+            nugget,
+            laplaceBool=True,
         )
         self.K_inv_laplace = np.linalg.inv(self.K_mat_laplace)
 
         self.g_vec = np.array([g(x) for x in self.X_boundary])
         self.f_vec = np.array([f(x) for x in self.X_int])
+        size_shared = self.all_shared.shape[0]
+        vec = np.concatenate(
+            [
+                np.zeros(size_shared),
+                np.zeros_like(self.g_vec),
+                np.zeros_like(self.f_vec),
+                np.zeros(2 * size_shared),
+                np.zeros_like(self.f_vec),
+            ]
+        )
+        self.storage = MatVecStorageLaplace(
+            self.K_inv_laplace, vec, self.X_int, self.X_shared, self.X_boundary
+        )
 
     def fit_interior(self, f, g, tau, dtau, use_shared, nugget=1e-5):
         if not hasattr(self, "g_vec"):
             self.setup_fit(f, g, nugget)
-        z_shared, L = self.get_shared_values(use_shared)
+        z_shared, dx_shared, dy_shared, L = self.get_shared_values(use_shared)
         self.gauss_newton_solution = PDESolver.gauss_newton(
             x_int=self.X_int,
             x_ext=self.X_boundary,
             z_shared=z_shared,
+            dx_shared=dx_shared,
+            dy_shared=dy_shared,
             L=L,
             f_vec=self.f_vec,
             g_vec=self.g_vec,
             tau=tau,
             dtau=dtau,
         )
-        # self.a = self.gauss_newton_solution["alpha"]
 
     def finish_fit(self):
-        z_shared = np.concatenate([self.shared_value[n] for n in self.neighbors])
         self.a = np.concatenate(
-            [
-                self.gauss_newton_solution["z"],
-                z_shared,
-                self.g_vec,
-                self.gauss_newton_solution["z_lap"],
-            ]
+            [self.shared_value[n]["dirac"] for n in self.neighbors]
+            + [self.g_vec]
+            + [self.gauss_newton_solution["z"]]
+            + [self.shared_value[n]["dx"] for n in self.neighbors]
+            + [self.shared_value[n]["dy"] for n in self.neighbors]
+            + [self.gauss_newton_solution["z_lap"]]
         )
         self.coeff = self.K_inv @ self.a
-        # to be deleted
-        # size = self.gauss_newton_solution["z"].shape[0]
-        # self.coeff[:size] = 0
-        # self.coeff[size:] = self.K_inv_laplace @ np.concatenate(
-        #    [z_shared, self.g_vec, self.gauss_newton_solution["z_lap"]]
-        # )
 
     def get_shared_values(self, use_shared):
         if use_shared:
-            z_shared = []
-            for n in self.neighbors:
-                z_shared.append(self.shared_value[n])
-            return np.concatenate(z_shared), self.L
+            z_shared = [self.shared_value[n]["dirac"] for n in self.neighbors]
+            dx_shared = [self.shared_value[n]["dx"] for n in self.neighbors]
+            dy_shared = [self.shared_value[n]["dy"] for n in self.neighbors]
+            return (
+                np.concatenate(z_shared),
+                np.concatenate(dx_shared),
+                np.concatenate(dy_shared),
+                self.L,
+            )
+
         K = PDESolver.get_kernel_matrix(
-            np.concatenate([self.X_int, self.X_boundary]),
-            self.Nd,
+            self.X_int,
+            np.empty((0, 2)),
+            self.X_boundary,
             self.sigma,
             self.nugget,
+            laplaceBool=False,
         )
-        return np.empty((0)), np.linalg.inv(np.linalg.cholesky(K))
+        return (
+            np.empty((0)),
+            np.empty((0)),
+            np.empty((0)),
+            np.linalg.inv(np.linalg.cholesky(K)),
+        )
 
     def add_neighbors(self, models, x_shareds):
         for model, x_shared in zip(models, x_shareds):
@@ -97,50 +131,43 @@ class PDESolver:
         )
         self.solved_shared = {key: False for key in self.neighbors}
 
-    def get_shared_indices(self, model):
-        begin = 0  # self.X_int.shape[0]
-        for n, x_shared in self.X_shared.items():
-            if n != model:
-                begin += x_shared.shape[0]
-            else:
-                break
-        end = begin + self.X_shared[model].shape[0]
-        return begin, end
-
     def setup_joint_fit(models):
         pairs = {}
+        operators = ["dirac", "dx", "dy"]
         begin = 0
-        for model in models:
-            for other_model in model.neighbors:
-                if not ((other_model, model) in pairs or (model, other_model) in pairs):
-                    pairs[(model, other_model)] = (
-                        begin,
-                        begin + model.X_shared[other_model].shape[0],
-                    )
-                    begin = begin + model.X_shared[other_model].shape[0]
+        for operator in operators:
+            for model in models:
+                for other_model in model.neighbors:
+                    if not (
+                        (operator, other_model, model) in pairs
+                        or (operator, model, other_model) in pairs
+                    ):
+                        pairs[(operator, model, other_model)] = (
+                            begin,
+                            begin + model.X_shared[other_model].shape[0],
+                        )
+                        begin = begin + model.X_shared[other_model].shape[0]
         matrices = []
         total_size = begin
         for model in models:
-            indices = []
             matrix = np.zeros((total_size, total_size))
-            for other_model in model.neighbors:
-                begin, end = model.get_shared_indices(other_model)
-                indices.append((begin, end))
-            for i, m1 in enumerate(model.neighbors):
-                for j, m2 in enumerate(model.neighbors):
-                    try:
-                        indices1 = pairs[(model, m1)]
-                    except:
-                        indices1 = pairs[(m1, model)]
-                    try:
-                        indices2 = pairs[(model, m2)]
-                    except:
-                        indices2 = pairs[(m2, model)]
-                    matrix[
-                        indices1[0] : indices1[1], indices2[0] : indices2[1]
-                    ] = model.K_inv_laplace[
-                        indices[i][0] : indices[i][1], indices[j][0] : indices[j][1]
-                    ]
+            for operator1 in operators:
+                for operator2 in operators:
+                    for m1 in model.neighbors:
+                        for m2 in model.neighbors:
+                            begin1, end1 = model.storage.get_index(m1, operator1)
+                            begin2, end2 = model.storage.get_index(m2, operator2)
+                            try:
+                                indices1 = pairs[(operator1, model, m1)]
+                            except:
+                                indices1 = pairs[(operator1, m1, model)]
+                            try:
+                                indices2 = pairs[(operator2, model, m2)]
+                            except:
+                                indices2 = pairs[(operator2, m2, model)]
+                            matrix[
+                                indices1[0] : indices1[1], indices2[0] : indices2[1]
+                            ] = model.K_inv_laplace[begin1:end1, begin2:end2]
             matrices.append(matrix)
         mat_left = np.sum(
             matrices,
@@ -161,22 +188,23 @@ class PDESolver:
         targets = []
         for model in models:
             target = np.zeros(mat_left.shape[0])
-            model_target = np.concatenate(
-                [model.g_vec, model.gauss_newton_solution["z_lap"]]
-            )
             for other_model in model.neighbors:
-                begin, end = model.get_shared_indices(other_model)
-                try:
-                    indices1 = pairs[(model, other_model)]
-                except:
-                    indices1 = pairs[(other_model, model)]
-                Nbegin = model.X_int.shape[0]
-                Nend = model.X_int.shape[0] + model.X_boundary.shape[0]
-                target[indices1[0] : indices1[1]] = (
-                    # model.K_inv[begin:end, :Nbegin] @ model.a[:Nbegin]+
-                    model.K_inv_laplace[begin:end, -Nend:]
-                    @ model_target
-                )
+                for operator in ["dirac", "dx", "dy"]:
+                    begin, end = model.storage.get_index(other_model, operator)
+                    begin_ext, end_ext = model.storage.get_index("ext", operator)
+                    begin_int, end_int = model.storage.get_index("int", operator)
+                    try:
+                        indices1 = pairs[(operator, model, other_model)]
+                    except:
+                        indices1 = pairs[(operator, other_model, model)]
+                    target[indices1[0] : indices1[1]] += (
+                        model.K_inv_laplace[begin:end, begin_ext:end_ext] @ model.g_vec
+                    )
+                    target[indices1[0] : indices1[1]] += (
+                        model.K_inv_laplace[begin:end, begin_int:end_int]
+                        @ model.gauss_newton_solution["z_lap"]
+                    )
+
             targets.append(target)
 
         target = np.sum(
@@ -188,24 +216,33 @@ class PDESolver:
         for model in models:
             model.shared_value = {}
             for n in model.neighbors:
-                try:
-                    indices = pairs[(model, n)]
-                except:
-                    indices = pairs[(n, model)]
-                model.shared_value[n] = shared_value[indices[0] : indices[1]]
+                model.shared_value[n] = {}
+                for operator in ["dirac", "dx", "dy"]:
+                    try:
+                        indices = pairs[(operator, model, n)]
+                    except:
+                        indices = pairs[(operator, n, model)]
+                    model.shared_value[n][operator] = shared_value[
+                        indices[0] : indices[1]
+                    ]
+
             model.finish_fit()
 
-    def joint_fit(models, f, g, tau, dtau, nugget=1e-5, tol=1e-6):
+    def joint_fit(
+        models, f, g, tau, dtau, nugget=1e-5, tol=1e-6, max_eval=100, show_progress=True
+    ):
         dz = {}
         for model in models:
             if not hasattr(model, "g_vec"):
                 model.setup_fit(f, g, nugget)
-            z_shared, L = model.get_shared_values(False)
+            z_shared, dx_shared, dy_shared, L = model.get_shared_values(False)
             model.gauss_newton_solution, dz[model] = PDESolver.gauss_newton_step(
                 x_int=model.X_int,
                 x_ext=model.X_boundary,
                 z=np.zeros(model.X_int.shape[0]),
                 z_shared=z_shared,
+                dx_shared=dx_shared,
+                dy_shared=dy_shared,
                 L=L,
                 f_vec=model.f_vec,
                 g_vec=model.g_vec,
@@ -213,18 +250,22 @@ class PDESolver:
                 dtau=dtau,
             )
         PDESolver.joint_fit_boundaries(models)
-        progress = tqdm()
+        if show_progress:
+            progress = tqdm()
         dz_norm = 10
-        while dz_norm > tol:
+        eval = 0
+        while dz_norm > tol and eval < max_eval:
             indexes = [k for k in range(len(models))]
             shuffle(indexes)
             for model in [models[k] for k in indexes]:
-                z_shared, L = model.get_shared_values(True)
+                z_shared, dx_shared, dy_shared, L = model.get_shared_values(True)
                 model.gauss_newton_solution, dz[model] = PDESolver.gauss_newton_step(
                     x_int=model.X_int,
                     x_ext=model.X_boundary,
                     z=model.gauss_newton_solution["z"],
                     z_shared=z_shared,
+                    dx_shared=dx_shared,
+                    dy_shared=dy_shared,
                     L=L,
                     f_vec=model.f_vec,
                     g_vec=model.g_vec,
@@ -233,10 +274,13 @@ class PDESolver:
                 )
 
             dz_norm = np.max([np.linalg.norm(dz[model], np.inf) for m in models])
-            progress.set_description(f"Current residual {dz_norm:.3e}")
-            progress.update()
+            if show_progress:
+                progress.set_description(f"Current residual {dz_norm:.3e}")
+                progress.update()
             PDESolver.joint_fit_boundaries(models)
-        progress.close()
+            eval += 1
+        if show_progress:
+            progress.close()
 
     def covariate_with_other(self, other_GP, x, sigma):
         M = self.find_covariance_matrix(other_GP, sigma)
@@ -269,13 +313,28 @@ class PDESolver:
 
     def __call__(self, x):
         return np.dot(
-            self.coeff, PDESolver.get_kernel_vector(self.X_all, self.Nd, self.sigma, x)
+            self.coeff,
+            PDESolver.get_kernel_vector(
+                self.X_int,
+                self.all_shared,
+                self.X_boundary,
+                self.sigma,
+                x,
+                laplaceBool=False,
+            ),
         )
 
     def laplacian(self, x):
         return np.dot(
             self.coeff,
-            PDESolver.get_laplacian_kernel_vector(self.X_all, self.Nd, self.sigma, x),
+            PDESolver.get_laplacian_kernel_vector(
+                self.X_int,
+                self.all_shared,
+                self.X_boundary,
+                self.sigma,
+                x,
+                laplaceBool=False,
+            ),
         )
 
     def __repr__(self) -> str:
@@ -284,20 +343,36 @@ class PDESolver:
         except:
             return "PDE Solver with K_mat : " + self.K_mat.__repr__()
 
-    def differential_matrix(z, N_int, N_ext, dtau):
+    def differential_matrix(z, N_int, N_shared, N_ext, dtau):
         return np.block(
-            [[-np.eye(N_int)], [np.zeros((N_ext, N_int))], [np.diag(dtau(z))]]
+            [
+                [np.zeros((N_ext + N_shared, N_int))],
+                [-np.eye(N_int)],
+                [np.zeros((2 * N_shared, N_int))],
+                [np.diag(dtau(z))],
+            ]
         )
 
-    def gauss_newton(x_int, x_ext, z_shared, L, f_vec, g_vec, tau, dtau):
+    def gauss_newton(
+        x_int, x_ext, z_shared, dx_shared, dy_shared, L, f_vec, g_vec, tau, dtau
+    ):
         z = np.zeros(x_int.shape[0])
-        alpha = lambda z: np.concatenate([z, z_shared, g_vec, f_vec - tau(z)])
         dz = 3 * np.ones_like(z)
         res = {}
         progress = tqdm()
         while np.linalg.norm(dz, np.inf) > 1e-6:
             res, dz = PDESolver.gauss_newton_step(
-                x_int, x_ext, z, z_shared, L, f_vec, g_vec, tau, dtau
+                x_int,
+                x_ext,
+                z,
+                z_shared,
+                dx_shared,
+                dy_shared,
+                L,
+                f_vec,
+                g_vec,
+                tau,
+                dtau,
             )
             progress.set_description(
                 f"Current residual {np.linalg.norm(dz,np.inf):.3e}"
@@ -306,87 +381,323 @@ class PDESolver:
         progress.close()
         return res
 
-    def gauss_newton_step(x_int, x_ext, z, z_shared, L, f_vec, g_vec, tau, dtau):
+    def gauss_newton_step(
+        x_int, x_ext, z, z_shared, dx_shared, dy_shared, L, f_vec, g_vec, tau, dtau
+    ):
         H = PDESolver.differential_matrix(
-            z, x_int.shape[0], x_ext.shape[0] + z_shared.shape[0], dtau
+            z, x_int.shape[0], z_shared.shape[0], x_ext.shape[0], dtau
         )
-        target = L @ np.concatenate([z, z_shared, g_vec, f_vec - tau(z)])
+        target = L @ np.concatenate(
+            [z_shared, g_vec, z, dx_shared, dy_shared, f_vec - tau(z)]
+        )
         mat = L @ H
         dz = np.linalg.lstsq(mat, target, rcond=None)[0]
         z += dz
         return {
             "z": z,
             "z_lap": f_vec - tau(z),
-            "alpha": np.concatenate([z, z_shared, g_vec, f_vec - tau(z)]),
+            "alpha": np.concatenate(
+                [z_shared, g_vec, z, dx_shared, dy_shared, f_vec - tau(z)]
+            ),
         }, dz
 
-    def get_kernel_matrix(X, Nd, sigma, nugget):
-        return PDESolver.get_covariance_matrix(X, X, Nd, Nd, sigma, nugget)
-        distances = pairwise_distances(X) ** 2
-        K11 = np.exp(-distances / 2 / sigma**2)
-        K12 = -K11[:, :Nd] * (distances[:, :Nd] - 2 * sigma**2) / sigma**4
-        K22 = (
-            K11[:Nd, :Nd]
-            * ((distances[:Nd, :Nd] - 4 * sigma**2) ** 2 - 8 * sigma**4)
-            / sigma**8
-        )
-        return np.block([[K11, K12], [K12.T, K22]])
+    def get_kernel_matrix(X_int, X_shared, X_ext, sigma, nugget, laplaceBool):
+        k2 = FasterGaussianKernel(sigma, X_int, X_shared, X_ext, laplaceBool)
+        dirac_mat = k2.get_dirac()
+        dx1 = k2.get_dx()
+        dy1 = k2.get_dy()
+        lap1 = k2.get_lap()
+        ddx1 = k2.get_dx1dx2()
+        dydx1 = k2.get_dy1dx2()
+        dxlap = k2.get_lap1dx2()
+        ddy = k2.get_dy1dy2()
+        dylap = k2.get_lap1dy2()
+        laplap = k2.get_lap1lap2()
+        res = [
+            [dirac_mat, dx1.T, dy1.T, lap1.T],
+            [dx1, ddx1, dydx1.T, dxlap.T],
+            [dy1, dydx1, ddy, dylap.T],
+            [lap1, dxlap, dylap, laplap],
+        ]
+        res = np.block(res)
+        return res + np.eye(res.shape[0]) * nugget
 
-    def get_covariance_matrix(X, Y, Nd_x, Nd_y, sigma, nugget):
-        distances = pairwise_distances(X, Y=Y) ** 2
-        nugget_mat = nugget * (distances == 0).astype(int)
-        K11 = np.exp(-distances / 2 / sigma**2)
-        K12 = -K11[:, :Nd_y] * (distances[:, :Nd_y] - 2 * sigma**2) / sigma**4
-        K21 = -K11[:Nd_x, :] * (distances[:Nd_x, :] - 2 * sigma**2) / sigma**4
-        K22 = (
-            K11[:Nd_x, :Nd_y]
-            * ((distances[:Nd_x, :Nd_y] - 4 * sigma**2) ** 2 - 8 * sigma**4)
-            / sigma**8
-        )
-        K11 += nugget_mat
-        K22 += nugget_mat[:Nd_x, :Nd_y]
-        return np.block([[K11, K12], [K21, K22]])
+    def get_kernel_vector(X_int, X_shared, X_ext, sigma, x, laplaceBool):
+        k2 = GaussianKernelVectorDirac(sigma, X_int, X_shared, X_ext, x, laplaceBool)
+        dirac_mat = k2.get_dirac()
+        dx1 = k2.get_dx()
+        dy1 = k2.get_dy()
+        lap1 = k2.get_lap()
+        return np.concatenate([dirac_mat, dx1, dy1, lap1])
 
-    def get_kernel_matrix_laplace(X, Nd, sigma, nugget):
-        return PDESolver.get_covariance_matrix_laplace(X, X, Nd, Nd, sigma, nugget)
+    def get_laplacian_kernel_vector(X_int, X_shared, X_ext, sigma, x, laplaceBool):
+        k2 = GaussianKernelVectorLap(sigma, X_int, X_shared, X_ext, x, laplaceBool)
+        lap = k2.get_lap()
+        dxlap = k2.get_lap1dx2()
+        dylap = k2.get_lap1dy2()
+        laplap = k2.get_lap1lap2()
+        return np.concatenate([lap, dxlap, dylap, laplap])
 
-    def get_covariance_matrix_laplace(X, Y, Nd_x, Nd_y, sigma, nugget):
-        distances = pairwise_distances(X, Y=Y) ** 2
-        nugget_mat = nugget * (distances == 0).astype(int)
-        K11 = np.exp(-distances / 2 / sigma**2)
-        K12 = (
-            -K11[Nd_x:, :Nd_y] * (distances[Nd_x:, :Nd_y] - 2 * sigma**2) / sigma**4
-        )
-        K21 = (
-            -K11[:Nd_x, Nd_y:] * (distances[:Nd_x, Nd_y:] - 2 * sigma**2) / sigma**4
-        )
-        K22 = (
-            K11[:Nd_x, :Nd_y]
-            * ((distances[:Nd_x, :Nd_y] - 4 * sigma**2) ** 2 - 8 * sigma**4)
-            / sigma**8
-        )
-        K11 += nugget_mat
-        K22 += nugget_mat[:Nd_x, :Nd_y]
-        K11 = K11[Nd_x:, Nd_y:]
 
-        return np.block([[K11, K12], [K21, K22]])
+class GaussianKernelVectorDirac:
+    def __init__(self, s, X_int, X_shared, X_boundary, x, laplaceBool):
+        self.sigma = s
+        self.x = x
+        self.X_int = X_int
+        self.X_shared = X_shared
+        self.X_boundary = X_boundary
+        if laplaceBool:
+            self.X_dirac = np.concatenate([X_shared, X_boundary])
+        else:
+            self.X_dirac = np.concatenate([X_shared, X_boundary, X_int])
+        self.size_dirac = self.X_dirac.shape[0]
+        self.all = np.concatenate([X_shared, X_boundary, X_int])
+        self.distances = pairwise_distances(self.all, Y=x) ** 2
+        self.exp_d = np.exp(-self.distances / 2 / s**2)
 
-    def get_kernel_vector(X, Nd, sigma, x):
-        distances = pairwise_distances(X, Y=x) ** 2
-        K1 = np.exp(-distances / 2 / sigma**2)
-        K2 = -K1[:Nd] * (distances[:Nd] - 2 * sigma**2) / sigma**4
-        return np.concatenate([K1, K2])
+    def get_dirac(self):
+        return self.exp_d[: self.size_dirac, :]
 
-    def get_laplacian_kernel_vector(x_all, Nd, sigma, x):
-        distances = pairwise_distances(x_all, Y=x) ** 2
-        K0 = np.exp(-distances / 2 / sigma**2)
-        K1 = K0 * (distances - 2 * sigma**2) / sigma**4
-        K2 = (
-            -K0[:Nd]
-            * ((distances[:Nd] - 4 * sigma**2) ** 2 - 8 * sigma**4)
-            / sigma**8
+    def get_dx(self):
+        diff_mat = np.expand_dims(self.x[:, 0], 0) - np.expand_dims(
+            self.X_shared[:, 0], 1
         )
-        return np.concatenate([K1, K2])
+        return self.exp_d[: self.X_shared.shape[0], :] * diff_mat / self.sigma**2
+
+    def get_dy(self):
+        diff_mat = np.expand_dims(self.x[:, 1], 0) - np.expand_dims(
+            self.X_shared[:, 1], 1
+        )
+        return self.exp_d[: self.X_shared.shape[0], :] * diff_mat / self.sigma**2
+
+    def get_lap(self):
+        to_mult = (
+            self.distances[-self.X_int.shape[0] :, :] - 2 * self.sigma**2
+        ) / self.sigma**4
+        return -self.exp_d[-self.X_int.shape[0] :, :] * to_mult
+
+
+class GaussianKernelVectorLap:
+    def __init__(self, s, X_int, X_shared, X_boundary, x, laplaceBool):
+        self.sigma = s
+        self.x = x
+        self.X_int = X_int
+        self.X_shared = X_shared
+        self.X_boundary = X_boundary
+        if laplaceBool:
+            self.X_dirac = np.concatenate([X_shared, X_boundary])
+        else:
+            self.X_dirac = np.concatenate([X_shared, X_boundary, X_int])
+        self.size_dirac = self.X_dirac.shape[0]
+        self.all = np.concatenate([X_shared, X_boundary, X_int])
+        self.distances = pairwise_distances(self.all, Y=x) ** 2
+        self.exp_d = np.exp(-self.distances / 2 / s**2)
+
+    def get_lap(self):
+        to_mult = (
+            self.distances[: self.size_dirac, :] - 2 * self.sigma**2
+        ) / self.sigma**4
+        return -self.exp_d[: self.size_dirac, :] * to_mult
+
+    def get_lap1dx2(self):
+        lap_like = (
+            self.distances[: self.X_shared.shape[0], :] - 4 * self.sigma**2
+        ) / self.sigma**6
+        diff = np.expand_dims(self.X_shared[:, 0], 1) - np.expand_dims(self.x[:, 0], 0)
+        return self.exp_d[: self.X_shared.shape[0], :] * lap_like * diff
+
+    def get_lap1dy2(self):
+        lap_like = (
+            self.distances[: self.X_shared.shape[0], :] - 4 * self.sigma**2
+        ) / self.sigma**6
+        diff = np.expand_dims(self.X_shared[:, 1], 1) - np.expand_dims(self.x[:, 1], 0)
+        return self.exp_d[: self.X_shared.shape[0], :] * lap_like * diff
+
+    def get_lap1lap2(self):
+        dist = (
+            (self.distances[-self.X_int.shape[0] :, :] - 4 * self.sigma**2) ** 2
+            - 8 * self.sigma**4
+        ) / self.sigma**8
+        return self.exp_d[-self.X_int.shape[0] :, :] * dist
+
+
+class FasterGaussianKernel:
+    def __init__(self, s, X_int, X_shared, X_boundary, laplaceBool):
+        self.sigma = s
+        self.X_int = X_int
+        self.X_shared = X_shared
+        self.X_boundary = X_boundary
+        if laplaceBool:
+            self.X_dirac = np.concatenate([X_shared, X_boundary])
+        else:
+            self.X_dirac = np.concatenate([X_shared, X_boundary, X_int])
+        self.size_dirac = self.X_dirac.shape[0]
+        self.all = np.concatenate([X_shared, X_boundary, X_int])
+        self.distances = pairwise_distances(self.all) ** 2
+        self.exp_d = np.exp(-self.distances / 2 / s**2)
+
+    def get_dirac(self):
+        return self.exp_d[: self.size_dirac, : self.size_dirac]
+
+    def get_dx(self):
+        diff_mat = np.expand_dims(self.X_dirac[:, 0], 0) - np.expand_dims(
+            self.X_shared[:, 0], 1
+        )
+        return (
+            self.exp_d[: self.X_shared.shape[0], : self.size_dirac]
+            * diff_mat
+            / self.sigma**2
+        )
+
+    def get_dy(self):
+        diff_mat = np.expand_dims(self.X_dirac[:, 1], 0) - np.expand_dims(
+            self.X_shared[:, 1], 1
+        )
+        return (
+            self.exp_d[: self.X_shared.shape[0], : self.size_dirac]
+            * diff_mat
+            / self.sigma**2
+        )
+
+    def get_lap(self):
+        to_mult = (
+            self.distances[-self.X_int.shape[0] :, : self.size_dirac]
+            - 2 * self.sigma**2
+        ) / self.sigma**4
+        return -self.exp_d[-self.X_int.shape[0] :, : self.size_dirac] * to_mult
+
+    def get_dx1dx2(self):
+        diff_mat = np.expand_dims(self.X_shared[:, 0], 0) - np.expand_dims(
+            self.X_shared[:, 0], 1
+        )
+        to_mult = (self.sigma**2 - diff_mat**2) / self.sigma**4
+        return to_mult * self.exp_d[: self.X_shared.shape[0], : self.X_shared.shape[0]]
+
+    def get_dy1dx2(self):
+        diff_mat_x = np.expand_dims(self.X_shared[:, 0], 0) - np.expand_dims(
+            self.X_shared[:, 0], 1
+        )
+        diff_mat_y = np.expand_dims(self.X_shared[:, 1], 0) - np.expand_dims(
+            self.X_shared[:, 1], 1
+        )
+        return (
+            -self.exp_d[: self.X_shared.shape[0], : self.X_shared.shape[0]]
+            * diff_mat_x
+            * diff_mat_y
+            / self.sigma**4
+        )
+
+    def get_lap1dx2(self):
+        lap_like = (
+            self.distances[-self.X_int.shape[0] :, : self.X_shared.shape[0]]
+            - 4 * self.sigma**2
+        ) / self.sigma**6
+        diff = np.expand_dims(self.X_int[:, 0], 1) - np.expand_dims(
+            self.X_shared[:, 0], 0
+        )
+        return -(
+            self.exp_d[-self.X_int.shape[0] :, : self.X_shared.shape[0]]
+            * lap_like
+            * diff
+        )
+
+    def get_dy1dy2(self):
+        diff_mat = np.expand_dims(self.X_shared[:, 1], 0) - np.expand_dims(
+            self.X_shared[:, 1], 1
+        )
+        to_mult = (self.sigma**2 - diff_mat**2) / self.sigma**4
+        return to_mult * self.exp_d[: self.X_shared.shape[0], : self.X_shared.shape[0]]
+
+    def get_lap1dy2(self):
+        lap_like = (
+            self.distances[-self.X_int.shape[0] :, : self.X_shared.shape[0]]
+            - 4 * self.sigma**2
+        ) / self.sigma**6
+        diff = np.expand_dims(self.X_int[:, 1], 1) - np.expand_dims(
+            self.X_shared[:, 1], 0
+        )
+        return -(
+            self.exp_d[-self.X_int.shape[0] :, : self.X_shared.shape[0]]
+            * lap_like
+            * diff
+        )
+
+    def get_lap1lap2(self):
+        dist = (
+            (
+                self.distances[-self.X_int.shape[0] :, -self.X_int.shape[0] :]
+                - 4 * self.sigma**2
+            )
+            ** 2
+            - 8 * self.sigma**4
+        ) / self.sigma**8
+        return self.exp_d[-self.X_int.shape[0] :, -self.X_int.shape[0] :] * dist
+
+
+class MatVecStorageLaplace:
+    def __init__(self, mat, vec, X_int, X_shared_dict, X_boundary) -> None:
+        self.mat = mat
+        self.vec = vec
+        self.X_int = X_int
+        self.X_shared_dict = X_shared_dict
+        self.X_boundary = X_boundary
+        self.indices = {}
+
+    def select_from_mat(self, axis, begin, end):
+        assert axis in ["x", "y", "xy"]
+        if axis == "xy":
+            return self.mat[begin:end, begin:end]
+        if axis == "y":
+            return self.mat[:, begin:end]
+        if axis == "x":
+            return self.mat[begin:end, :]
+
+    def get_index(self, who, operator):
+        try:
+            begin, end = self.indices[(who, operator)]
+        except KeyError:
+            if who == "ext":
+                begin = sum([x.shape[0] for x in self.X_shared_dict.values()])
+                end = begin + self.X_boundary.shape[0]
+            elif who == "int":
+                begin = (
+                    3 * sum([x.shape[0] for x in self.X_shared_dict.values()])
+                    + self.X_boundary.shape[0]
+                )
+                end = begin + self.X_int.shape[0]
+            else:
+                if operator == "dirac":
+                    begin = 0
+                elif operator == "dx":
+                    begin = (
+                        sum([x.shape[0] for x in self.X_shared_dict.values()])
+                        + self.X_boundary.shape[0]
+                    )
+                elif operator == "dy":
+                    begin = (
+                        2 * sum([x.shape[0] for x in self.X_shared_dict.values()])
+                        + self.X_boundary.shape[0]
+                    )
+                else:
+                    raise f"operator uknown: {operator}"
+
+                for n, X in self.X_shared_dict.items():
+                    if n != who:
+                        begin += X.shape[0]
+                    else:
+                        break
+                end = begin + self.X_shared_dict[who].shape[0]
+
+            self.indices[(who, operator)] = (begin, end)
+        return (begin, end)
+
+    def get_mat(self, who, operator, axis):
+        begin, end = self.get_index(who, operator)
+        return self.select_from_mat(axis, begin, end)
+
+    def get_vec(self, who, operator):
+        begin, end = self.get_index(who, operator)
+        return self.vec[begin:end]
 
 
 class Aggregate:
