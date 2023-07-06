@@ -27,29 +27,59 @@ class PDESolver:
             self.all_shared = np.concatenate(list(self.X_shared.values()))
         except:
             self.all_shared = np.empty((0, 2))
-        self.K_mat = PDESolver.get_kernel_matrix(
+        self.K_mat, B, D = PDESolver.get_kernel_matrix(
             self.X_int,
             self.all_shared,
             self.X_boundary,
             self.sigma,
             nugget,
             laplaceBool=False,
+            shared_laplacian=True,
         )
-        self.L = np.linalg.inv(np.linalg.cholesky(self.K_mat))
-        self.K_inv = self.L.T @ self.L
+        chol = np.linalg.cholesky(np.block([[self.K_mat, B.T], [B, D]]))
 
-        self.K_mat_laplace = PDESolver.get_kernel_matrix(
+        if self.all_shared.shape[0] == 0:
+            self.L = np.linalg.inv(chol)
+            self.L_shared_lap = np.linalg.inv(chol)
+        else:
+            self.L_shared_lap = np.linalg.inv(chol)
+            self.L = self.L_shared_lap[
+                : -self.all_shared.shape[0], : -self.all_shared.shape[0]
+            ]
+
+        self.K_inv = self.L.T @ self.L
+        """S = D - B @ self.K_inv @ B.T
+        print(np.linalg.eigvalsh())
+        print(np.linalg.eigvalsh(S))
+        cholS = np.linalg.cholesky(S)
+        self.L_shared_lap = np.block(
+            [[chol, np.zeros_like(B.T)], [B @ (self.L.T), cholS]]
+        )"""
+
+        """self.L_shared_lap = np.linalg.inv(np.linalg.cholesky(self.K_mat_shared_lap))
+        if self.all_shared.shape[0] == 0:
+            self.K_mat = self.K_mat_shared_lap
+            self.L = self.L_shared_lap
+        else:
+            self.K_mat = self.K_mat_shared_lap[
+                : -self.all_shared.shape[0], : -self.all_shared.shape[0]
+            ]
+            self.L = np.linalg.inv(np.linalg.cholesky(self.K_mat))"""
+
+        self.K_mat_laplace, _, _ = PDESolver.get_kernel_matrix(
             self.X_int,
             self.all_shared,
             self.X_boundary,
             self.sigma,
             nugget,
             laplaceBool=True,
+            shared_laplacian=False,
         )
         self.K_inv_laplace = np.linalg.inv(self.K_mat_laplace)
 
         self.g_vec = np.array([g(x) for x in self.X_boundary])
         self.f_vec = np.array([f(x) for x in self.X_int])
+        self.f_vec_shared = np.array([f(x) for x in self.all_shared])
         size_shared = self.all_shared.shape[0]
         vec = np.concatenate(
             [
@@ -64,10 +94,12 @@ class PDESolver:
             self.K_inv_laplace, vec, self.X_int, self.X_shared, self.X_boundary
         )
 
-    def fit_interior(self, f, g, tau, dtau, use_shared, nugget=1e-5):
+    def fit_interior(self, f, g, tau, dtau, use_shared, share_laplacian, nugget=1e-5):
         if not hasattr(self, "g_vec"):
             self.setup_fit(f, g, nugget)
-        z_shared, dx_shared, dy_shared, L = self.get_shared_values(use_shared)
+        z_shared, dx_shared, dy_shared, L, shared_laplacian = self.get_shared_values(
+            use_shared, share_laplacian, tau
+        )
         self.gauss_newton_solution = PDESolver.gauss_newton(
             x_int=self.X_int,
             x_ext=self.X_boundary,
@@ -79,6 +111,7 @@ class PDESolver:
             g_vec=self.g_vec,
             tau=tau,
             dtau=dtau,
+            shared_laplacian=shared_laplacian,
         )
 
     def finish_fit(self):
@@ -92,31 +125,49 @@ class PDESolver:
         )
         self.coeff = self.K_inv @ self.a
 
-    def get_shared_values(self, use_shared):
+    def get_shared_values(self, use_shared, share_laplacian, tau):
         if use_shared:
-            z_shared = [self.shared_value[n]["dirac"] for n in self.neighbors]
-            dx_shared = [self.shared_value[n]["dx"] for n in self.neighbors]
-            dy_shared = [self.shared_value[n]["dy"] for n in self.neighbors]
+            z_shared = np.concatenate(
+                [self.shared_value[n]["dirac"] for n in self.neighbors]
+            )
+            dx_shared = np.concatenate(
+                [self.shared_value[n]["dx"] for n in self.neighbors]
+            )
+            dy_shared = np.concatenate(
+                [self.shared_value[n]["dy"] for n in self.neighbors]
+            )
+            lap_shared = self.f_vec_shared - tau(z_shared)
+            if share_laplacian:
+                return (
+                    z_shared,
+                    dx_shared,
+                    dy_shared,
+                    self.L_shared_lap,
+                    lap_shared,
+                )
             return (
-                np.concatenate(z_shared),
-                np.concatenate(dx_shared),
-                np.concatenate(dy_shared),
+                z_shared,
+                dx_shared,
+                dy_shared,
                 self.L,
+                np.empty((0)),
             )
 
-        K = PDESolver.get_kernel_matrix(
+        K, _, _ = PDESolver.get_kernel_matrix(
             self.X_int,
             np.empty((0, 2)),
             self.X_boundary,
             self.sigma,
             self.nugget,
             laplaceBool=False,
+            shared_laplacian=False,
         )
         return (
             np.empty((0)),
             np.empty((0)),
             np.empty((0)),
             np.linalg.inv(np.linalg.cholesky(K)),
+            np.empty((0)),
         )
 
     def add_neighbors(self, models, x_shareds):
@@ -235,7 +286,13 @@ class PDESolver:
         for model in models:
             if not hasattr(model, "g_vec"):
                 model.setup_fit(f, g, nugget)
-            z_shared, dx_shared, dy_shared, L = model.get_shared_values(False)
+            (
+                z_shared,
+                dx_shared,
+                dy_shared,
+                L,
+                shared_laplacian,
+            ) = model.get_shared_values(False, False, tau)
             model.gauss_newton_solution, dz[model] = PDESolver.gauss_newton_step(
                 x_int=model.X_int,
                 x_ext=model.X_boundary,
@@ -248,6 +305,7 @@ class PDESolver:
                 g_vec=model.g_vec,
                 tau=tau,
                 dtau=dtau,
+                shared_laplacian=shared_laplacian,
             )
         PDESolver.joint_fit_boundaries(models)
         if show_progress:
@@ -258,7 +316,15 @@ class PDESolver:
             indexes = [k for k in range(len(models))]
             shuffle(indexes)
             for model in [models[k] for k in indexes]:
-                z_shared, dx_shared, dy_shared, L = model.get_shared_values(True)
+                (
+                    z_shared,
+                    dx_shared,
+                    dy_shared,
+                    L,
+                    shared_laplacian,
+                ) = model.get_shared_values(
+                    True, False, tau
+                )  # (True, (dz_norm < 100 * tol), tau)
                 model.gauss_newton_solution, dz[model] = PDESolver.gauss_newton_step(
                     x_int=model.X_int,
                     x_ext=model.X_boundary,
@@ -271,6 +337,7 @@ class PDESolver:
                     g_vec=model.g_vec,
                     tau=tau,
                     dtau=dtau,
+                    shared_laplacian=shared_laplacian,
                 )
 
             dz_norm = np.max([np.linalg.norm(dz[model], np.inf) for m in models])
@@ -281,6 +348,31 @@ class PDESolver:
             eval += 1
         if show_progress:
             progress.close()
+        """indexes = [k for k in range(len(models))]
+        shuffle(indexes)
+        for model in [models[k] for k in indexes]:
+            (
+                z_shared,
+                dx_shared,
+                dy_shared,
+                L,
+                shared_laplacian,
+            ) = model.get_shared_values(True, True, tau)
+            model.gauss_newton_solution, dz[model] = PDESolver.gauss_newton_step(
+                x_int=model.X_int,
+                x_ext=model.X_boundary,
+                z=model.gauss_newton_solution["z"],
+                z_shared=z_shared,
+                dx_shared=dx_shared,
+                dy_shared=dy_shared,
+                L=L,
+                f_vec=model.f_vec,
+                g_vec=model.g_vec,
+                tau=tau,
+                dtau=dtau,
+                shared_laplacian=shared_laplacian,
+            )
+        PDESolver.joint_fit_boundaries(models)"""
 
     def covariate_with_other(self, other_GP, x, sigma):
         M = self.find_covariance_matrix(other_GP, sigma)
@@ -343,18 +435,29 @@ class PDESolver:
         except:
             return "PDE Solver with K_mat : " + self.K_mat.__repr__()
 
-    def differential_matrix(z, N_int, N_shared, N_ext, dtau):
+    def differential_matrix(z, N_int, N_shared, N_ext, dtau, share_laplacian):
         return np.block(
             [
                 [np.zeros((N_ext + N_shared, N_int))],
                 [-np.eye(N_int)],
                 [np.zeros((2 * N_shared, N_int))],
                 [np.diag(dtau(z))],
+                [np.zeros((int(share_laplacian) * N_shared, N_int))],
             ]
         )
 
     def gauss_newton(
-        x_int, x_ext, z_shared, dx_shared, dy_shared, L, f_vec, g_vec, tau, dtau
+        x_int,
+        x_ext,
+        z_shared,
+        dx_shared,
+        dy_shared,
+        L,
+        f_vec,
+        g_vec,
+        tau,
+        dtau,
+        shared_laplacian,
     ):
         z = np.zeros(x_int.shape[0])
         dz = 3 * np.ones_like(z)
@@ -373,6 +476,7 @@ class PDESolver:
                 g_vec,
                 tau,
                 dtau,
+                shared_laplacian,
             )
             progress.set_description(
                 f"Current residual {np.linalg.norm(dz,np.inf):.3e}"
@@ -382,13 +486,29 @@ class PDESolver:
         return res
 
     def gauss_newton_step(
-        x_int, x_ext, z, z_shared, dx_shared, dy_shared, L, f_vec, g_vec, tau, dtau
+        x_int,
+        x_ext,
+        z,
+        z_shared,
+        dx_shared,
+        dy_shared,
+        L,
+        f_vec,
+        g_vec,
+        tau,
+        dtau,
+        shared_laplacian,
     ):
         H = PDESolver.differential_matrix(
-            z, x_int.shape[0], z_shared.shape[0], x_ext.shape[0], dtau
+            z,
+            x_int.shape[0],
+            z_shared.shape[0],
+            x_ext.shape[0],
+            dtau,
+            share_laplacian=not (shared_laplacian.shape[0] == 0),
         )
         target = L @ np.concatenate(
-            [z_shared, g_vec, z, dx_shared, dy_shared, f_vec - tau(z)]
+            [z_shared, g_vec, z, dx_shared, dy_shared, f_vec - tau(z), shared_laplacian]
         )
         mat = L @ H
         dz = np.linalg.lstsq(mat, target, rcond=None)[0]
@@ -401,7 +521,9 @@ class PDESolver:
             ),
         }, dz
 
-    def get_kernel_matrix(X_int, X_shared, X_ext, sigma, nugget, laplaceBool):
+    def get_kernel_matrix(
+        X_int, X_shared, X_ext, sigma, nugget, laplaceBool, shared_laplacian
+    ):
         k2 = FasterGaussianKernel(sigma, X_int, X_shared, X_ext, laplaceBool)
         dirac_mat = k2.get_dirac()
         dx1 = k2.get_dx()
@@ -413,6 +535,7 @@ class PDESolver:
         ddy = k2.get_dy1dy2()
         dylap = k2.get_lap1dy2()
         laplap = k2.get_lap1lap2()
+
         res = [
             [dirac_mat, dx1.T, dy1.T, lap1.T],
             [dx1, ddx1, dydx1.T, dxlap.T],
@@ -420,7 +543,25 @@ class PDESolver:
             [lap1, dxlap, dylap, laplap],
         ]
         res = np.block(res)
-        return res + np.eye(res.shape[0]) * nugget
+
+        if not shared_laplacian:
+            return res + np.eye(res.shape[0]) * nugget, None, None
+
+        lap_shared = k2.get_lap_of_shared()
+        dxlap_shared = k2.get_lap1dx2_of_shared()
+        dylap_shared = k2.get_lap1dy2_of_shared()
+        laplap_shared_shared = k2.get_lap1lap2_of_shared_shared()
+        laplap_int_shared = k2.get_lap1lap2_of_int_shared()
+
+        V = np.concatenate(
+            [lap_shared.T, dxlap_shared, dylap_shared, laplap_int_shared.T], axis=1
+        )
+        # res_shared = np.block([[res, V.T], [V, laplap_shared_shared]])
+        return (
+            res + np.eye(res.shape[0]) * nugget,
+            V,
+            laplap_shared_shared + np.eye(laplap_shared_shared.shape[0]) * nugget,
+        )
 
     def get_kernel_vector(X_int, X_shared, X_ext, sigma, x, laplaceBool):
         k2 = GaussianKernelVectorDirac(sigma, X_int, X_shared, X_ext, x, laplaceBool)
@@ -566,6 +707,13 @@ class FasterGaussianKernel:
         ) / self.sigma**4
         return -self.exp_d[-self.X_int.shape[0] :, : self.size_dirac] * to_mult
 
+    def get_lap_of_shared(self):
+        to_mult = (
+            self.distances[: self.X_dirac.shape[0], : self.X_shared.shape[0]]
+            - 2 * self.sigma**2
+        ) / self.sigma**4
+        return -self.exp_d[: self.X_dirac.shape[0], : self.X_shared.shape[0]] * to_mult
+
     def get_dx1dx2(self):
         diff_mat = np.expand_dims(self.X_shared[:, 0], 0) - np.expand_dims(
             self.X_shared[:, 0], 1
@@ -601,6 +749,20 @@ class FasterGaussianKernel:
             * diff
         )
 
+    def get_lap1dx2_of_shared(self):
+        lap_like = (
+            self.distances[: self.X_shared.shape[0], : self.X_shared.shape[0]]
+            - 4 * self.sigma**2
+        ) / self.sigma**6
+        diff = np.expand_dims(self.X_shared[:, 0], 1) - np.expand_dims(
+            self.X_shared[:, 0], 0
+        )
+        return -(
+            self.exp_d[: self.X_shared.shape[0], : self.X_shared.shape[0]]
+            * lap_like
+            * diff
+        )
+
     def get_dy1dy2(self):
         diff_mat = np.expand_dims(self.X_shared[:, 1], 0) - np.expand_dims(
             self.X_shared[:, 1], 1
@@ -622,6 +784,20 @@ class FasterGaussianKernel:
             * diff
         )
 
+    def get_lap1dy2_of_shared(self):
+        lap_like = (
+            self.distances[: self.X_shared.shape[0], : self.X_shared.shape[0]]
+            - 4 * self.sigma**2
+        ) / self.sigma**6
+        diff = np.expand_dims(self.X_shared[:, 1], 1) - np.expand_dims(
+            self.X_shared[:, 1], 0
+        )
+        return -(
+            self.exp_d[: self.X_shared.shape[0], : self.X_shared.shape[0]]
+            * lap_like
+            * diff
+        )
+
     def get_lap1lap2(self):
         dist = (
             (
@@ -632,6 +808,28 @@ class FasterGaussianKernel:
             - 8 * self.sigma**4
         ) / self.sigma**8
         return self.exp_d[-self.X_int.shape[0] :, -self.X_int.shape[0] :] * dist
+
+    def get_lap1lap2_of_int_shared(self):
+        dist = (
+            (
+                self.distances[-self.X_int.shape[0] :, : self.X_shared.shape[0]]
+                - 4 * self.sigma**2
+            )
+            ** 2
+            - 8 * self.sigma**4
+        ) / self.sigma**8
+        return self.exp_d[-self.X_int.shape[0] :, : self.X_shared.shape[0]] * dist
+
+    def get_lap1lap2_of_shared_shared(self):
+        dist = (
+            (
+                self.distances[: self.X_shared.shape[0], : self.X_shared.shape[0]]
+                - 4 * self.sigma**2
+            )
+            ** 2
+            - 8 * self.sigma**4
+        ) / self.sigma**8
+        return self.exp_d[: self.X_shared.shape[0], : self.X_shared.shape[0]] * dist
 
 
 class MatVecStorageLaplace:
