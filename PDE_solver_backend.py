@@ -3,6 +3,7 @@ from sklearn.metrics import pairwise_distances
 from functools import partial
 from tqdm import tqdm
 from random import shuffle
+from kernel import Differentiable_matern_kernel, Differentiable_gaussian_kernel
 
 
 class PDESolver:
@@ -521,7 +522,101 @@ class PDESolver:
             ),
         }, dz
 
-    def get_kernel_matrix(
+    def get_kernel_matrix_matern(
+        X_int, X_shared, X_ext, l, nu, nugget, laplaceBool, shared_laplacian
+    ):
+        k = Differentiable_matern_kernel(nu, l)
+        if laplaceBool:
+            X_dirac = np.concatenate([X_shared, X_ext])
+        else:
+            X_dirac = np.concatenate([X_shared, X_ext, X_int])
+
+        dirac_mat = k.apply("kappa", X_dirac, X_dirac)
+        dx1 = k.apply("D_x1_kappa", X_shared, X_dirac)
+        dy1 = k.apply("D_x2_kappa", X_shared, X_dirac)
+        lap1 = k.apply("Delta_x_kappa", X_int, X_dirac)
+        ddx1 = k.apply("D_x1_D_y1_kappa", X_shared, X_shared)
+        dydx1 = k.apply("D_x2_D_y1_kappa", X_shared, X_shared)
+        dxlap = k.apply("Delta_x_D_y1_kappa", X_int, X_shared)
+        ddy = k.apply("D_x2_D_y2_kappa", X_shared, X_shared)
+        dylap = k.apply("Delta_x_D_y2_kappa", X_int, X_shared)
+        laplap = k.apply("Delta_x_Delta_y_kappa", X_int, X_int)
+
+        res = [
+            [dirac_mat, dx1.T, dy1.T, lap1.T],
+            [dx1, ddx1, dydx1.T, dxlap.T],
+            [dy1, dydx1, ddy, dylap.T],
+            [lap1, dxlap, dylap, laplap],
+        ]
+        res = np.block(res)
+
+        if not shared_laplacian:
+            return res + np.eye(res.shape[0]) * nugget, None, None
+
+        lap_shared = k.apply("Delta_x_kappa", X_shared, X_dirac)
+        dxlap_shared = k.apply("Delta_x_D_y1_kappa", X_shared, X_shared)
+        dylap_shared = k.apply("Delta_x_D_y2_kappa", X_shared, X_shared)
+        laplap_shared_shared = k.apply("Delta_x_Delta_y_kappa", X_shared, X_shared)
+        laplap_int_shared = k.apply("Delta_x_Delta_y_kappa", X_shared, X_int)
+
+        V = np.concatenate(
+            [lap_shared, dxlap_shared, dylap_shared, laplap_int_shared], axis=1
+        )
+        # res_shared = np.block([[res, V.T], [V, laplap_shared_shared]])
+        return (
+            res + np.eye(res.shape[0]) * nugget,
+            V,
+            laplap_shared_shared + np.eye(laplap_shared_shared.shape[0]) * nugget,
+        )
+
+    def get_kernel_matrix_gaussian(
+        X_int, X_shared, X_ext, sigma, nugget, laplaceBool, shared_laplacian
+    ):
+        k = Differentiable_gaussian_kernel(sigma)
+        if laplaceBool:
+            X_dirac = np.concatenate([X_shared, X_ext])
+        else:
+            X_dirac = np.concatenate([X_shared, X_ext, X_int])
+
+        dirac_mat = k.apply("kappa", X_dirac, X_dirac)
+        dx1 = k.apply("D_x1_kappa", X_shared, X_dirac)
+        dy1 = k.apply("D_x2_kappa", X_shared, X_dirac)
+        lap1 = -k.apply("Delta_x_kappa", X_int, X_dirac)
+        ddx1 = k.apply("D_x1_D_y1_kappa", X_shared, X_shared)
+        dydx1 = k.apply("D_x2_D_y1_kappa", X_shared, X_shared)
+        dxlap = -k.apply("Delta_x_D_y1_kappa", X_int, X_shared)
+        ddy = k.apply("D_x2_D_y2_kappa", X_shared, X_shared)
+        dylap = -k.apply("Delta_x_D_y2_kappa", X_int, X_shared)
+        laplap = k.apply("Delta_x_Delta_y_kappa", X_int, X_int)
+
+        res = [
+            [dirac_mat, dx1.T, dy1.T, lap1.T],
+            [dx1, ddx1, dydx1.T, dxlap.T],
+            [dy1, dydx1, ddy, dylap.T],
+            [lap1, dxlap, dylap, laplap],
+        ]
+        res = np.block(res)
+
+        if not shared_laplacian:
+            return res + np.eye(res.shape[0]) * nugget, None, None
+
+        lap_shared = -k.apply("Delta_x_kappa", X_shared, X_dirac)
+        dxlap_shared = -k.apply("Delta_x_D_y1_kappa", X_shared, X_shared)
+        dylap_shared = -k.apply("Delta_x_D_y2_kappa", X_shared, X_shared)
+        laplap_shared_shared = k.apply("Delta_x_Delta_y_kappa", X_shared, X_shared)
+        laplap_int_shared = k.apply("Delta_x_Delta_y_kappa", X_shared, X_int)
+
+        V = np.concatenate(
+            [lap_shared, dxlap_shared, dylap_shared, laplap_int_shared], axis=1
+        )
+        # res_shared = np.block([[res, V.T], [V, laplap_shared_shared]])
+        return (
+            res + np.eye(res.shape[0]) * nugget,
+            V,
+            laplap_shared_shared + np.eye(laplap_shared_shared.shape[0]) * nugget,
+        )
+
+    def get_kernel_matrix_fast_gaussian(
         X_int, X_shared, X_ext, sigma, nugget, laplaceBool, shared_laplacian
     ):
         k2 = FasterGaussianKernel(sigma, X_int, X_shared, X_ext, laplaceBool)
@@ -563,7 +658,33 @@ class PDESolver:
             laplap_shared_shared + np.eye(laplap_shared_shared.shape[0]) * nugget,
         )
 
-    def get_kernel_vector(X_int, X_shared, X_ext, sigma, x, laplaceBool):
+    def get_kernel_vector_matern(X_int, X_shared, X_ext, l, nu, x, laplaceBool):
+        k = Differentiable_matern_kernel(nu, l)
+        if laplaceBool:
+            X_dirac = np.concatenate([X_shared, X_ext])
+        else:
+            X_dirac = np.concatenate([X_shared, X_ext, X_int])
+        dirac_mat = k.apply("kappa", X_dirac, x)
+        dx1 = k.apply("D_x1_kappa", X_shared, x)
+        dy1 = k.apply("D_x2_kappa", X_shared, x)
+        lap1 = -k.apply("Delta_x_kappa", X_int, x)
+        return np.concatenate([dirac_mat, dx1, dy1, lap1])
+
+    def get_laplacian_kernel_vector_matern(
+        X_int, X_shared, X_ext, l, nu, x, laplaceBool
+    ):
+        k = Differentiable_matern_kernel(nu, l)
+        if laplaceBool:
+            X_dirac = np.concatenate([X_shared, X_ext])
+        else:
+            X_dirac = np.concatenate([X_shared, X_ext, X_int])
+        lap = -k.apply("Delta_x_kappa", x, X_dirac).T
+        dxlap = -k.apply("Delta_x_D_y1_kappa", x, X_shared).T
+        dylap = -k.apply("Delta_x_D_y2_kappa", x, X_shared).T
+        laplap = k.apply("Delta_x_Delta_y_kappa", x, X_int).T
+        return np.concatenate([lap, dxlap, dylap, laplap])
+
+    def get_kernel_vector_fast_gaussian(X_int, X_shared, X_ext, sigma, x, laplaceBool):
         k2 = GaussianKernelVectorDirac(sigma, X_int, X_shared, X_ext, x, laplaceBool)
         dirac_mat = k2.get_dirac()
         dx1 = k2.get_dx()
@@ -571,7 +692,9 @@ class PDESolver:
         lap1 = k2.get_lap()
         return np.concatenate([dirac_mat, dx1, dy1, lap1])
 
-    def get_laplacian_kernel_vector(X_int, X_shared, X_ext, sigma, x, laplaceBool):
+    def get_laplacian_kernel_vector_fast_gaussian(
+        X_int, X_shared, X_ext, sigma, x, laplaceBool
+    ):
         k2 = GaussianKernelVectorLap(sigma, X_int, X_shared, X_ext, x, laplaceBool)
         lap = k2.get_lap()
         dxlap = k2.get_lap1dx2()
