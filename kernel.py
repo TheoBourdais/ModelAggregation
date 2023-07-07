@@ -5,6 +5,11 @@ from jax.config import config
 from tensorflow_probability.substrates.jax.math import bessel_kve
 from jax.scipy.special import gammaln
 from scipy.special import gamma
+from tensorflow_probability.substrates.jax.math.psd_kernels import (
+    MaternOneHalf,
+    MaternThreeHalves,
+    MaternFiveHalves,
+)
 
 config.update("jax_enable_x64", True)
 
@@ -134,6 +139,13 @@ class Differentiable_gaussian_kernel(Differentiable_kernel):
 
 class Differentiable_matern_kernel(Differentiable_kernel):
     def __init__(self, nu, l):
+        if nu == 1 / 2:
+            self.k = MaternOneHalf(length_scale=l)
+        if nu == 3 / 2:
+            self.k = MaternThreeHalves(length_scale=l)
+        if nu == 5 / 2:
+            self.k = MaternFiveHalves(length_scale=l)
+
         self.nu = nu
         self.l = l
         self.mult_Z = jnp.sqrt(2 * nu) / l
@@ -141,5 +153,7 @@ class Differentiable_matern_kernel(Differentiable_kernel):
 
     @partial(jit, static_argnums=(0,))
     def kappa(self, x1, x2, y1, y2):
+        if self.nu in [1 / 2, 3 / 2, 5 / 2]:
+            return self.k.apply([x1, x2], [y1, y2])
         z = jnp.sqrt((x1 - y1) ** 2 + (x2 - y2) ** 2) * self.mult_Z
         return z**self.nu * bessel_kve(self.nu, z) * jnp.exp(-z) * self.scale
