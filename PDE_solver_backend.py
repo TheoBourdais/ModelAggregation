@@ -684,7 +684,6 @@ class PDESolver:
         laplap = k.apply("Delta_x_Delta_y_kappa", x, X_int).T
         return np.concatenate([lap, dxlap, dylap, laplap])
 
-    def get_kernel_vector_fast_gaussian(X_int, X_shared, X_ext, sigma, x, laplaceBool):
     def get_kernel_vector(X_int, X_shared, X_ext, sigma, x, laplaceBool):
         k2 = GaussianKernelVectorDirac(sigma, X_int, X_shared, X_ext, x, laplaceBool)
         dirac_mat = k2.get_dirac()
