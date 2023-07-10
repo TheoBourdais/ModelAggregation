@@ -28,7 +28,7 @@ class PDESolver:
             self.all_shared = np.concatenate(list(self.X_shared.values()))
         except:
             self.all_shared = np.empty((0, 2))
-        self.K_mat, B, D = PDESolver.get_kernel_matrix(
+        self.K_mat, B, D = PDESolver.get_kernel_matrix_fast_gaussian(
             self.X_int,
             self.all_shared,
             self.X_boundary,
@@ -67,7 +67,7 @@ class PDESolver:
             ]
             self.L = np.linalg.inv(np.linalg.cholesky(self.K_mat))"""
 
-        self.K_mat_laplace, _, _ = PDESolver.get_kernel_matrix(
+        self.K_mat_laplace, _, _ = PDESolver.get_kernel_matrix_fast_gaussian(
             self.X_int,
             self.all_shared,
             self.X_boundary,
@@ -154,7 +154,7 @@ class PDESolver:
                 np.empty((0)),
             )
 
-        K, _, _ = PDESolver.get_kernel_matrix(
+        K, _, _ = PDESolver.get_kernel_matrix_fast_gaussian(
             self.X_int,
             np.empty((0, 2)),
             self.X_boundary,
@@ -685,6 +685,7 @@ class PDESolver:
         return np.concatenate([lap, dxlap, dylap, laplap])
 
     def get_kernel_vector_fast_gaussian(X_int, X_shared, X_ext, sigma, x, laplaceBool):
+    def get_kernel_vector(X_int, X_shared, X_ext, sigma, x, laplaceBool):
         k2 = GaussianKernelVectorDirac(sigma, X_int, X_shared, X_ext, x, laplaceBool)
         dirac_mat = k2.get_dirac()
         dx1 = k2.get_dx()
@@ -692,9 +693,7 @@ class PDESolver:
         lap1 = k2.get_lap()
         return np.concatenate([dirac_mat, dx1, dy1, lap1])
 
-    def get_laplacian_kernel_vector_fast_gaussian(
-        X_int, X_shared, X_ext, sigma, x, laplaceBool
-    ):
+    def get_laplacian_kernel_vector(X_int, X_shared, X_ext, sigma, x, laplaceBool):
         k2 = GaussianKernelVectorLap(sigma, X_int, X_shared, X_ext, x, laplaceBool)
         lap = k2.get_lap()
         dxlap = k2.get_lap1dx2()
