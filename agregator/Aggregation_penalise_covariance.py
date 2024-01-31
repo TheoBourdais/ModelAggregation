@@ -52,7 +52,7 @@ class Agregator:
     def kernel_matrix(self):
         return self._kernel_matrix
 
-    def fit(self, X, y, alpha=1.0, cov_regularizer=1.0):
+    def fit(self, X, y, is_unseen, alpha=1.0, cov_regularizer=1.0):
         new = self.__class__(**self.attributes)
         new.X = X
         n = X.shape[0]
@@ -61,16 +61,21 @@ class Agregator:
         new.Mmat = self.call_models(X)
         to_invert = np.einsum("ijkl,ki->ijl", new.kernel_matrix, new.Mmat)
         to_invert = to_invert.reshape(n, n * new.model_number)
-        errors = y[None, :] - new.Mmat
-        to_invert_2 = np.einsum("ijkl,ki->ikjl", new.kernel_matrix, errors)
-        to_invert_2 = to_invert_2.reshape(n * new.model_number, n * new.model_number)
+        errors = y[None, is_unseen] - new.Mmat[:, is_unseen]
+        to_invert_2 = np.einsum("ijkl,ki->ikjl", new.kernel_matrix[is_unseen], errors)
+        to_invert_2 = to_invert_2.reshape(
+            np.sum(is_unseen) * new.model_number, n * new.model_number
+        )
         V, intercept = Agregator.solve_lstsq(
             A=np.concatenate(
                 [to_invert, np.sqrt(cov_regularizer) * to_invert_2], axis=0
             ),
-            Y=np.concatenate([y, np.zeros(n * new.model_number)], axis=0),
+            Y=np.concatenate(
+                [y, np.zeros(np.sum(is_unseen) * new.model_number)], axis=0
+            ),
             M=new.Mmat,
             intercept=None if new.fit_intercept else new.intercept,
+            is_unseen=is_unseen,
             alpha=alpha,
             cov_regularizer=cov_regularizer,
         )
@@ -82,11 +87,11 @@ class Agregator:
         return np.stack(list(map(lambda x: x.predict(X), self.models)), axis=0)
 
     def regularized_lstsq(A, y, reg=1e-10):
-        AtA = A.T @ A
-        AtA.flat[:: AtA.shape[0] + 1] += reg
-        return scipy.linalg.solve(AtA, A.T @ y, assume_a="pos")
+        A2 = np.concatenate([A, np.sqrt(reg) * np.eye(A.shape[1])], axis=0)
+        y2 = np.concatenate([y, np.zeros(A.shape[1])], axis=0)
+        return scipy.linalg.lstsq(A2, y2)[0]
 
-    def solve_lstsq(A, Y, M, intercept, alpha=1e-10, cov_regularizer=1e-10):
+    def solve_lstsq(A, Y, M, intercept, is_unseen, alpha=1e-10, cov_regularizer=1e-10):
         return_intercept = intercept is None
         errors = Y[: M.shape[1]][None, :] - M
         mat = np.concatenate(
@@ -94,6 +99,7 @@ class Agregator:
             + [
                 np.sqrt(cov_regularizer) * np.diag(errors[:, i])
                 for i in range(errors.shape[1])
+                if is_unseen[i]
             ],
             axis=0,
         )
