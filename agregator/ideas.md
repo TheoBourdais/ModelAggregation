@@ -80,6 +80,22 @@ The Gaussian process doesn't know that the models are supposed to regress $Y$. I
 The solution might be to change the regularisation, by adding the fact that aggregator should avoid using bad models. i.e. adding the term
 $$\lambda_2\sum_{j=1}^{k}\sum_{i=1}^N \alpha_j^2(x_i)(M_j(x_i)-Y_i)^2$$
 
+We are now solving, for $E_i^2=(Diag(M_k(x_i))-Y_i)^2$
+$$V=\argmin_{v\in\mathbb{R}^{kn}} \left\lVert Y-\mathcal{M}v \right\rVert^2+\lambda \lVert v \rVert^2+\lambda_2 v^TKDiag(E_i^2)Kv$$
+So 
+$$V=\left(\mathcal{M}^T\mathcal{M}+\lambda I+\lambda_2 KDiag(E_i^2)K\right)^{-1}\mathcal{M}^TY$$
+Using the definition of $\mathcal{M}=Diag(M(x_i)^T)K$, we get 
+$$V=\left(K[Diag(M(x_i))Diag(M(x_i)^T)+\lambda_2 Diag(E_i^2)]K+\lambda I\right)^{-1}K\ Diag(M(x_i))Y$$
+
+> $$(P^{-1}+B^TR^{-1}B)^{-1}B^TR^{-1}=PB^T(BPB^T+R)^{-1}$$
+
+Since before we were forming the matrix $\mathcal{M}$ and solving a regularized least square, we can make this matrix larger and define
+
+$$\tilde{\mathcal{M}}=\begin{pmatrix} 
+            \mathcal{M} \\
+            \sqrt{\lambda_2}Diag(E_i)K
+            \end{pmatrix}$$
+
 This seem to be like giving models a covariances 
 $$Cov(M(x_i))=\begin{pmatrix} 
             (M_1(x_i)-Y_i)^2 & \dots & 0 \\
@@ -107,3 +123,9 @@ Maybe we could modify this covariance computation to take into account the covar
 > - Create the attention kernel
 > - create a difference between training and validation data in the aggregation
 >   - i.e. model overfitting
+
+
+## Attention kernel
+
+Chose a kernel $k$, then you can define
+$$K_{i,j}(x,y)=k(M_i(x),M_j(y))$$
