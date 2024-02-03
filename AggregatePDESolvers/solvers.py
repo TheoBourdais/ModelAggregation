@@ -136,12 +136,14 @@ def prepare_GP_solver(N, N_target_fixed, sigma=0.1, nugget=1e-7):
     y = np.linspace(0, L, N_target_fixed + 1, endpoint=True)
     X, Y = np.meshgrid(x, y)
     Kx = kernel.Kx(np.concatenate([X.reshape(-1, 1), Y.reshape(-1, 1)], axis=1))
-    V = scipy.linalg.cho_solve(cho_factor, Kx)
+    V = scipy.linalg.cho_solve(cho_factor, Kx)[int(N * 0.15) :]
 
     def solver(f, N_target):
-        assert N_target == N_target_fixed
+        assert (
+            N_target == N_target_fixed
+        ), f"N_target {N_target} should be equal to N_target_fixed {N_target_fixed}"
         F = f(X_int.T)
-        U = np.dot(F, V[int(N * 0.15) :])
+        U = np.dot(F, V)
         return -U.reshape((N + 1, N + 1))
 
     return solver

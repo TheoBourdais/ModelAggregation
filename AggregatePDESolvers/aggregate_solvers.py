@@ -8,11 +8,11 @@ from scipy.linalg import lstsq
 class Agregator:
     DEFINING_ATTRIBUTES = ["K", "solvers", "kernel_name"]
 
-    def __init__(self, K, solvers, kernel_name=None):
+    def __init__(self, K, solvers, PCA_covariance_ratio, kernel_name=None):
         self.K = K
         self.solvers = solvers
         self.kernel_name = kernel_name
-        self.pca = PCA(n_components="mle")
+        self.pca = PCA(n_components=PCA_covariance_ratio)
 
     @property
     def attributes(self):
@@ -34,7 +34,7 @@ class Agregator:
             raise AttributeError("You must fit the model before calling its intercept")
 
     def to_components(self, f):
-        assert f.shape[-1] == f.shape[-2] and f.shape[-1] == self.grid_number
+        assert f.shape[-1] == f.shape[-2] and f.shape[-1] == self.grid_number + 1
         return self.pca.fit_transform(f.reshape(np.prod(f.shape[:-2]), -1)).reshape(
             (*f.shape[:-2], self.components_number)
         )
@@ -58,7 +58,7 @@ class Agregator:
         self.F = F
         n = y.shape[0]
         self.y = y
-        self.grid_number = y.shape[1]
+        self.grid_number = y.shape[1] - 1
         self.y_components = self.pca.fit_transform(y.reshape(n, -1))
         self.components_number = self.y_components.shape[1]
         self._kernel_matrix = self.K(F, F)
