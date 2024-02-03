@@ -122,7 +122,7 @@ class GaussianKernel:
         return np.concatenate([dirac, lap], axis=0)
 
 
-def prepare_GP_solver(N, sigma=0.1, nugget=1e-7):
+def prepare_GP_solver(N, N_target_fixed, sigma=0.1, nugget=1e-7):
     L = 1
     X_int = np.random.rand(int(N * 0.85), 2)
     X_bnd = np.random.rand(int(N * 0.15), 2)
@@ -132,16 +132,16 @@ def prepare_GP_solver(N, sigma=0.1, nugget=1e-7):
     K = kernel.K() + nugget * np.eye(N)
     cho_factor = scipy.linalg.cho_factor(K, lower=True)
 
+    x = np.linspace(0, L, N_target_fixed + 1, endpoint=True)  # exclude boundary points
+    y = np.linspace(0, L, N_target_fixed + 1, endpoint=True)
+    X, Y = np.meshgrid(x, y)
+    Kx = kernel.Kx(np.concatenate([X.reshape(-1, 1), Y.reshape(-1, 1)], axis=1))
+    V = scipy.linalg.cho_solve(cho_factor, Kx)
+
     def solver(f, N_target):
+        assert N_target == N_target_fixed
         F = f(X_int.T)
-        V = scipy.linalg.cho_solve(
-            cho_factor, np.concatenate([np.zeros(int(N * 0.15)), F])
-        )
-        x = np.linspace(0, L, N_target + 1, endpoint=True)  # exclude boundary points
-        y = np.linspace(0, L, N_target + 1, endpoint=True)
-        X, Y = np.meshgrid(x, y)
-        Kx = kernel.Kx(np.concatenate([X.reshape(-1, 1), Y.reshape(-1, 1)], axis=1))
-        U = np.dot(V, Kx)
+        U = np.dot(F, V[int(N * 0.15) :])
         return -U.reshape((N + 1, N + 1))
 
     return solver
