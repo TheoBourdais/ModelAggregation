@@ -29,7 +29,7 @@ def prepare_spectral_poisson_solve(N):
     denominator = KX**2 + KY**2
 
     def solver(f, N_target):
-        F = f([X, Y])
+        F = f(X, Y)
         Fhat = dstn(F, type=1)
         Uhat = Fhat / denominator
         U = idstn(-Uhat, type=1)
@@ -51,11 +51,13 @@ def prepare_fdm_poisson_solve(N):
     y = np.linspace(0, L, N + 1, endpoint=True)
     X, Y = np.meshgrid(x[1:-1], y[1:-1])
 
+    factorized_A = sp.linalg.factorized(A)
+
     def solver(f, N_target):
-        F = f([X, Y])
+        F = f(X, Y)
         F_flat = F.flatten()
 
-        U_flat, _ = cg(A, F_flat, tol=1e-6)
+        U_flat = factorized_A(F_flat)
         U = np.zeros((N + 1, N + 1))
         U[1:N, 1:N] = -U_flat.reshape((N - 1, N - 1))
         interp = RegularGridInterpolator((x, y), U.T)
@@ -115,9 +117,7 @@ class GaussianKernel:
     def Kx(self, x):
         dist = pairwise_distances(self.all, x) ** 2
         dirac = np.exp(-dist / 2 / self.sigma**2)[: self.size_dirac]
-        to_mult_lap = (
-            dist[-self.X_int.shape[0] :] - 2 * self.sigma**2
-        ) / self.sigma**4
+        to_mult_lap = (dist[-self.X_int.shape[0] :] - 2 * self.sigma**2) / self.sigma**4
         lap = -np.exp(-dist[-self.X_int.shape[0] :] / 2 / self.sigma**2) * to_mult_lap
         return np.concatenate([dirac, lap], axis=0)
 
@@ -142,9 +142,10 @@ def prepare_GP_solver(N, N_target_fixed, sigma=0.1, nugget=1e-7):
         assert (
             N_target == N_target_fixed
         ), f"N_target {N_target} should be equal to N_target_fixed {N_target_fixed}"
-        F = f(X_int.T)
-        U = np.dot(F, V)
-        return -U.reshape((N + 1, N + 1))
+        F = f(X_int[:, 0], X_int[:, 1])
+
+        U = V.T @ F
+        return -U.reshape((N_target + 1, N_target + 1))
 
     return solver
 
@@ -421,12 +422,12 @@ def prepare_solve_poisson_fdm_inhomogeneus(N1, N2, L1, L2):
         x1 = np.linspace(0, L1, N1 + 1, endpoint=True)[1:]
         y1 = np.linspace(0, L, N1y + 1, endpoint=True)[1:-1]
         X1, Y1 = np.meshgrid(x1, y1)
-        F1 = f([X1, Y1]).flatten()
+        F1 = f(X1, Y1).flatten()
 
         x2 = np.linspace(L1, L, N2 + 1, endpoint=True)[:-1]
         y2 = np.linspace(0, L, N2y + 1, endpoint=True)[1:-1]
         X2, Y2 = np.meshgrid(x2, y2)
-        F2 = f([X2, Y2]).flatten()
+        F2 = f(X2, Y2).flatten()
 
         F_flat = np.concatenate([F1, F2])
         U_flat = -factorized_A(F_flat)

@@ -4,20 +4,15 @@ from sklearn.decomposition import PCA
 from tqdm.notebook import tqdm
 from scipy.linalg import lstsq
 import time
-from functools import partial
 
 
-class Agregator:
+class AgregatorPoint:
     DEFINING_ATTRIBUTES = ["K", "solvers", "kernel_name"]
 
-    def __init__(
-        self, K, solvers, func_to_array, PCA_covariance_ratio, kernel_name=None
-    ):
-        self.k = K
+    def __init__(self, K, solvers, PCA_covariance_ratio, kernel_name=None):
+        self.K = K
         self.solvers = solvers
         self.kernel_name = kernel_name
-        self.pca = PCA(n_components=PCA_covariance_ratio)
-        self.func_to_array = func_to_array
 
     @property
     def attributes(self):
@@ -33,14 +28,10 @@ class Agregator:
 
     def to_components(self, f):
         assert f.shape[-1] == f.shape[-2] and f.shape[-1] == self.grid_number + 1
-        return self.pca.transform(f.reshape(np.prod(f.shape[:-2]), -1)).reshape(
-            (*(f.shape[:-2]), self.components_number)
-        )
+        return f.reshape(*(f.shape[:-2]), -1)
 
     def from_components(self, c):
-        return self.pca.inverse_transform(
-            c.reshape(-1, self.components_number)
-        ).reshape((*(c.shape[:-1]), self.grid_number + 1, self.grid_number + 1))
+        return c.reshape((*(c.shape[:-1]), self.grid_number + 1, self.grid_number + 1))
 
     def call_models(self, F):
         return np.stack(
@@ -48,7 +39,7 @@ class Agregator:
                 np.stack(
                     [solver(f, N_target=self.grid_number) for solver in self.solvers]
                 )
-                for f in tqdm(F, desc="evaluating models")
+                for f in tqdm(F)
             ]
         )
 
@@ -59,20 +50,23 @@ class Agregator:
             np.stack(list(map(lambda f: f(x), F2))),
         )
 
-    def fit(self, F, y, alpha=1.0, cov_regularizer=1.0):
+    def fit(self, F, y, alpha=1.0, cov_regularizer=1.0, eps=1e-15):
+        """if alpha * y.shape[0] + np.log(eps) < 0:
+        print(
+            f"alpha {alpha} must be larger than np.log(eps)/y.shape[0] {-np.log(eps)/y.shape[0]}"
+        )
+        alpha = -np.log(eps) / y.shape[0] + 1e-10
+        print(f"alpha set to {alpha}")"""
         n = y.shape[0]
         if not hasattr(self, "y") or not np.allclose(y, self.y):
             self.y = y
             self.grid_number = y.shape[1] - 1
-            self.y_components = self.pca.fit_transform(y.reshape(n, -1))
+            self.y_components = self.to_components(y)
             self.components_number = self.y_components.shape[1]
 
-        if not hasattr(self, "F") or not Agregator.F_equality(F, self.F):
+        if not hasattr(self, "F") or not AgregatorPoint.F_equality(F, self.F):
             self.F = F
-            self.F_array = self.func_to_array(F)
-            l = np.sqrt(np.mean(np.linalg.norm(self.F_array, axis=(-1, -2)) ** 2))
-            self.K = partial(self.k, l=l)
-            self.kernel_matrix = self.K(self.F_array, self.F_array)
+            self.kernel_matrix = self.K(F, F)
             self.Mmat = self.call_models(F)
             self.Mmat_components = self.to_components(self.Mmat)
 
@@ -80,13 +74,16 @@ class Agregator:
             "ijkl,ikm->ijlm", self.kernel_matrix, self.Mmat_components
         )
         to_invert = to_invert.reshape(n, n * self.model_number, self.components_number)
-        errors = self.y_components[:, None, :] - self.Mmat_components
+        errors = np.sqrt(
+            np.log(eps + (self.y_components[:, None, :] - self.Mmat_components) ** 2)
+            - np.log(eps)
+        )
         to_invert_2 = np.einsum("ijkl,ikm->ikjlm", self.kernel_matrix, errors)
         to_invert_2 = to_invert_2.reshape(
             n * self.model_number, n * self.model_number, self.components_number
         )
         Vs = []
-        for i in range(self.components_number):
+        for i in tqdm(range(self.components_number)):
             A = np.concatenate(
                 [
                     to_invert[:, :, i],
@@ -98,7 +95,7 @@ class Agregator:
             Y_to_solve = np.concatenate(
                 [self.y_components[:, i], np.zeros(to_invert_2.shape[1])], axis=0
             )
-            V = Agregator.regularized_lstsq(
+            V = AgregatorPoint.regularized_lstsq(
                 A, Y_to_solve, reg=alpha * to_invert.shape[0]
             )
             Vs.append(V.reshape(n, self.model_number))
@@ -110,24 +107,13 @@ class Agregator:
         y2 = np.concatenate([y, np.zeros(A.shape[1])], axis=0)
         return lstsq(A2, y2)[0]
 
-    def pred_for_train(self, return_alpha=False):
-        try:
-            K_eval = self.kernel_matrix
-            alpha = np.einsum("ijp,ikjm->mkp", self.V, K_eval)
-            pred_aggregate = np.einsum("ijp,jip->jp", alpha, self.Mmat_components)
-            pred_aggregate = self.from_components(pred_aggregate)
-            if return_alpha:
-                return pred_aggregate, alpha
-            return pred_aggregate
-        except AttributeError:
-            raise AttributeError("You must fit the model before calling it")
-
     def __call__(self, x, return_alpha=False):
         try:
-            K_eval = self.K(self.F_array, self.func_to_array(x))
+            K_eval = self.K(self.F, x)
             Mmat_components_eval = self.to_components(self.call_models(x))
             alpha = np.einsum("ijp,ikjm->mkp", self.V, K_eval)
             pred_aggregate = np.einsum("ijp,jip->jp", alpha, Mmat_components_eval)
+            print(pred_aggregate.shape, alpha.shape, Mmat_components_eval.shape)
             pred_aggregate = self.from_components(pred_aggregate)
             if return_alpha:
                 return pred_aggregate, alpha
