@@ -7,9 +7,10 @@ from scipy.sparse.linalg import cg
 import scipy.linalg
 from scipy.interpolate import RegularGridInterpolator
 from sklearn.metrics import pairwise_distances
+from savefunctions import ParametrizedSavingFunction, InputForSavingFunction, PDESolver
 
 
-def prepare_spectral_poisson_solve(N):
+def prepare_spectral_poisson_solve(N, N_target):
     """
     Solve the Poisson equation
     \Delta u = f
@@ -21,28 +22,38 @@ def prepare_spectral_poisson_solve(N):
     x = np.linspace(0, 1, N + 1, endpoint=True)
     y = np.linspace(0, 1, N + 1, endpoint=True)
     X, Y = np.meshgrid(x[1:-1], y[1:-1])
+    input_val = InputForSavingFunction(
+        np.stack((X, Y)), path=None, name="poisson_input", in_memory=True
+    )
 
     # Create the wave numbers
     kx = np.pi * np.arange(1, N)
     ky = np.pi * np.arange(1, N)
     KX, KY = np.meshgrid(kx, ky)
     denominator = KX**2 + KY**2
+    x_target = np.linspace(0, 1, N_target + 1, endpoint=True)
+    y_target = np.linspace(0, 1, N_target + 1, endpoint=True)
+    X_target, Y_target = np.meshgrid(x_target, y_target)
 
-    def solver(f, N_target):
-        F = f(X, Y)
+    def solver(func):
+        F = func(input_val)
         Fhat = dstn(F, type=1)
         Uhat = Fhat / denominator
         U = idstn(-Uhat, type=1)
         res = np.pad(U, ((1, 1), (1, 1)), "constant")
-        x_target = np.linspace(0, 1, N_target + 1, endpoint=True)
-        y_target = np.linspace(0, 1, N_target + 1, endpoint=True)
-        X_target, Y_target = np.meshgrid(x_target, y_target)
+
         return RegularGridInterpolator((x, y), res.T)((X_target, Y_target))
 
-    return solver
+    return PDESolver(
+        f=solver,
+        param_hash=f"N={N}_Ntarget={N_target}",
+        path="./saves",
+        name="spectral_solver",
+        save_val=True,
+    )
 
 
-def prepare_fdm_poisson_solve(N):
+def prepare_fdm_poisson_solve(N, N_target):
     L = 1
     h = L / (N)
 
@@ -51,22 +62,34 @@ def prepare_fdm_poisson_solve(N):
     y = np.linspace(0, L, N + 1, endpoint=True)
     X, Y = np.meshgrid(x[1:-1], y[1:-1])
 
+    input_val = InputForSavingFunction(
+        np.stack((X, Y)), path=None, name="fdm_input", in_memory=True
+    )
+
     factorized_A = sp.linalg.factorized(A)
 
-    def solver(f, N_target):
-        F = f(X, Y)
+    x_target = np.linspace(0, L, N_target + 1, endpoint=True)
+    y_target = np.linspace(0, L, N_target + 1, endpoint=True)
+    X_target, Y_target = np.meshgrid(x_target, y_target)
+
+    def solver(f):
+        F = f(input_val)
         F_flat = F.flatten()
 
         U_flat = factorized_A(F_flat)
         U = np.zeros((N + 1, N + 1))
         U[1:N, 1:N] = -U_flat.reshape((N - 1, N - 1))
         interp = RegularGridInterpolator((x, y), U.T)
-        x_target = np.linspace(0, L, N_target + 1, endpoint=True)
-        y_target = np.linspace(0, L, N_target + 1, endpoint=True)
-        X_target, Y_target = np.meshgrid(x_target, y_target)
+
         return interp((X_target, Y_target))
 
-    return solver
+    return PDESolver(
+        f=solver,
+        param_hash=f"N={N}_Ntarget={N_target}",
+        path="./saves",
+        name="fdm_solver",
+        save_val=True,
+    )
 
 
 def send_to_boundary(X):
@@ -122,7 +145,7 @@ class GaussianKernel:
         return np.concatenate([dirac, lap], axis=0)
 
 
-def prepare_GP_solver(N, N_target_fixed, sigma=0.1, nugget=1e-7):
+def prepare_GP_solver(N, N_target, sigma=0.1, nugget=1e-7):
     L = 1
     X_int = np.random.rand(int(N * 0.85), 2)
     X_bnd = np.random.rand(int(N * 0.15), 2)
@@ -132,22 +155,28 @@ def prepare_GP_solver(N, N_target_fixed, sigma=0.1, nugget=1e-7):
     K = kernel.K() + nugget * np.eye(N)
     cho_factor = scipy.linalg.cho_factor(K, lower=True)
 
-    x = np.linspace(0, L, N_target_fixed + 1, endpoint=True)  # exclude boundary points
-    y = np.linspace(0, L, N_target_fixed + 1, endpoint=True)
+    x = np.linspace(0, L, N_target + 1, endpoint=True)  # exclude boundary points
+    y = np.linspace(0, L, N_target + 1, endpoint=True)
     X, Y = np.meshgrid(x, y)
     Kx = kernel.Kx(np.concatenate([X.reshape(-1, 1), Y.reshape(-1, 1)], axis=1))
     V = scipy.linalg.cho_solve(cho_factor, Kx)[int(N * 0.15) :]
 
-    def solver(f, N_target):
-        assert (
-            N_target == N_target_fixed
-        ), f"N_target {N_target} should be equal to N_target_fixed {N_target_fixed}"
-        F = f(X_int[:, 0], X_int[:, 1])
+    input_val = InputForSavingFunction(
+        X_int.T, path=None, name="gauss_input", in_memory=True
+    )
 
+    def solver(f):
+        F = f(input_val)
         U = V.T @ F
         return -U.reshape((N_target + 1, N_target + 1))
 
-    return solver
+    return PDESolver(
+        f=solver,
+        param_hash=f"N={N}_Ntarget={N_target}",
+        path="./saves",
+        name="gauss_solver",
+        save_val=True,
+    )
 
 
 def make_mat(Nx, hx, Ny, hy):
@@ -387,10 +416,10 @@ def make_right_interpolation(L1, N1, N1y, N2, N2y, h1, h1y, h2, h2y):
     return -data / h1**2, rows, cols
 
 
-def prepare_solve_poisson_fdm_inhomogeneus(N1, N2, L1, L2):
+def prepare_solve_poisson_fdm_inhomogeneus(N1, N2, L1, L2, N_target):
     L = 1
     assert L1 + L2 == L
-
+    hash_params = f"{N1}{L1}{N2}{L2}{N_target}"
     h1 = L1 / (N1)
     N1y = int(L / h1)
     h1y = L / (N1y)
@@ -418,16 +447,24 @@ def prepare_solve_poisson_fdm_inhomogeneus(N1, N2, L1, L2):
 
     factorized_A = sp.linalg.factorized(A)
 
-    def solver(f, N_target):
-        x1 = np.linspace(0, L1, N1 + 1, endpoint=True)[1:]
-        y1 = np.linspace(0, L, N1y + 1, endpoint=True)[1:-1]
-        X1, Y1 = np.meshgrid(x1, y1)
-        F1 = f(X1, Y1).flatten()
+    x1 = np.linspace(0, L1, N1 + 1, endpoint=True)[1:]
+    y1 = np.linspace(0, L, N1y + 1, endpoint=True)[1:-1]
+    X1, Y1 = np.meshgrid(x1, y1)
+    input_val1 = InputForSavingFunction(
+        np.stack([X1, Y1]), path=None, name=f"fdm_input1_{hash_params}", in_memory=True
+    )
 
-        x2 = np.linspace(L1, L, N2 + 1, endpoint=True)[:-1]
-        y2 = np.linspace(0, L, N2y + 1, endpoint=True)[1:-1]
-        X2, Y2 = np.meshgrid(x2, y2)
-        F2 = f(X2, Y2).flatten()
+    x2 = np.linspace(L1, L, N2 + 1, endpoint=True)[:-1]
+    y2 = np.linspace(0, L, N2y + 1, endpoint=True)[1:-1]
+    X2, Y2 = np.meshgrid(x2, y2)
+    input_val2 = InputForSavingFunction(
+        np.stack([X2, Y2]), path=None, name=f"fdm_input2_{hash_params}", in_memory=True
+    )
+
+    def solver(f):
+
+        F1 = f(input_val1).flatten()
+        F2 = f(input_val2).flatten()
 
         F_flat = np.concatenate([F1, F2])
         U_flat = -factorized_A(F_flat)
@@ -439,4 +476,10 @@ def prepare_solve_poisson_fdm_inhomogeneus(N1, N2, L1, L2):
         )
         return interpolate_two_blocks(L1, L, Uleft, Uright, N_target)
 
-    return solver
+    return PDESolver(
+        f=solver,
+        param_hash=hash_params,
+        path="./saves",
+        name=f"inhomog_fdm_solver",
+        save_val=True,
+    )
