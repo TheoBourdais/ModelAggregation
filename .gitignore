@@ -155,3 +155,4 @@ domain_decomposition_GP_PDE/.DS_Store
 domain_decomposition_GP_PDE/not active/.DS_Store
 *.vtk
 *.mesh
+*.npy
