@@ -156,3 +156,4 @@ domain_decomposition_GP_PDE/not active/.DS_Store
 *.vtk
 *.mesh
 *.npy
+AggregatePDESolvers/saves/parametrized_saving_function.csv
