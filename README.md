@@ -3,7 +3,7 @@
 This repository contains the different examples presented in our paper. 
 
 We have:
-* [The pathological examples](./pathological_examples)
+* [The pathological examples](./pathological_cases)
 * [The Boston housing dataset](./boston-housing)
 * [The Laplace Equation PDE solving](./laplace)
 * [The Burgers Equation PDE solving](./burgers)
