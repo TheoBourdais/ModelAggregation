@@ -156,3 +156,4 @@ cython_debug/
 *.npz
 *zip
 stale_research/
+figs.key
