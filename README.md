@@ -1,6 +1,6 @@
 # ModelAggregation
  
-This repository contains the different examples presented in our paper. 
+This repository contains the different examples presented in our paper: [Model aggregation: minimizing empirical variance outperforms minimizing empirical error](https://arxiv.org/abs/2409.17267). 
 
 We have:
 * [The pathological examples](./pathological_cases)
